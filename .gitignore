@@ -1,0 +1,16 @@
+
+# Virtual environment
+venv_sbg/
+
+# Python cache
+__pycache__/
+
+# Folders
+logs/
+results/
+data/
+synthetic_data/
+
+# Files
+NOTES.md
+nohup.out

@@ -1,0 +1,31 @@
+# ------------------------
+# To install manually before
+# pip install torch
+# pip install torch-geometric
+# ------------------------
+
+# PyG Dependencies
+# torch-scatter
+# torch-sparse
+
+# Data Science
+numpy
+scipy
+scikit-learn
+
+# Graph Analysis
+igraph
+networkx
+
+# Visualization
+matplotlib
+seaborn
+pandas
+tqdm
+
+# Notebooks
+jupyter
+ipykernel
+
+# Other
+pyyaml
