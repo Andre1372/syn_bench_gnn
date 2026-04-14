@@ -3,10 +3,7 @@
 import logging
 from typing import Any
 from pathlib import Path
-from contextlib import nullcontext
-import csv
 
-import igraph as ig
 import numpy as np
 import networkx as nx
 import torch
@@ -15,10 +12,10 @@ from torch_geometric.datasets import TUDataset
 from tqdm import tqdm
 from tqdm.contrib.logging import logging_redirect_tqdm
 
-from src.data_utils import igraph_to_pytorch, networkx_to_igraph, pytorch_to_networkx, save_synthetic_dataset, remove_features
-from src.graph_analysis import analyze_single_graph
+from src.data_utils import igraph_to_pytorch, networkx_to_igraph, igraph_to_networkx, pytorch_to_igraph, save_synthetic_dataset, remove_features
+from src.graph_analysis import compute_target_stats
 
-from src.padma.graph_generator import generate_graph as padma_generate_graph, compute_graph_stats
+from src.padma.graph_generator import generate_graph as padma_generate_graph
 
 
 logger = logging.getLogger(__name__)
@@ -129,12 +126,12 @@ def generate_synthetic_variants(
     with logging_redirect_tqdm():
         pbar = tqdm(enumerate(dataset), total=len(dataset), desc=f"Phase A [{dataset_name}/{method}]")
         for i, data in pbar:
-            obs_nx = pytorch_to_networkx(data)
+            obs_ig = pytorch_to_igraph(data)
             
             # Precompute target statistics
-            target_stats = compute_graph_stats(obs_nx)
+            target_stats = compute_target_stats(obs_ig)
             if method == "pdd":
-                target_stats["observed_nx"] = obs_nx
+                target_stats["observed_nx"] = igraph_to_networkx(obs_ig)
 
             for v in range(num_variants):
                 current_seed = int(rng.integers(0, 2**31))

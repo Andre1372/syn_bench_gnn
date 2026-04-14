@@ -4,6 +4,7 @@ import numpy as np
 import networkx as nx
 from scipy import stats
 import logging
+from typing import Any
 
 from src.padma.maxent_optimizer import maxent_optimize_discrete
 
@@ -13,42 +14,6 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Utility helpers
 # ---------------------------------------------------------------------------
-
-def compute_graph_stats(g: nx.Graph, normalize_by_size: bool = True) -> dict[str, Any]:
-    """Compute target statistics for graph generation.
-
-    Args:
-        g: The input NetworkX graph.
-        normalize_by_size: If True, normalize degree moments by (n-1).
-    Returns:
-        A dictionary containing:
-        - 'n_nodes': Number of nodes.
-        - 'n_edges': Number of edges.
-        - 'normalized_degree_moments': List of [mean, var, skew, kurt] (normalized).
-    """
-    n = g.number_of_nodes()
-    m = g.number_of_edges()
-    
-    if n < 1:
-        return {"n_nodes": n, "n_edges": m, "normalized_degree_moments": [0.0, 0.0, 0.0, 3.0]}
-
-    degrees = np.array([d for _, d in g.degree()], dtype=float)
-    
-    if normalize_by_size: degrees_norm = degrees / max(n - 1, 1)
-    else: degrees_norm = degrees.copy()
-
-    mean_norm = float(np.mean(degrees_norm))
-    var_norm = float(np.var(degrees_norm, ddof=0))
-    
-    if var_norm > 1e-10:
-        skew_norm = float(stats.skew(degrees_norm, bias=False))
-        kurt_norm = float(stats.kurtosis(degrees_norm, bias=False)) + 3.0
-    else:
-        skew_norm = 0.0
-        kurt_norm = 3.0
-
-    return {"n_nodes": n, "n_edges": m, "normalized_degree_moments": [mean_norm, var_norm, skew_norm, kurt_norm]}
-
 
 def _find_skewness_bounds(mean_norm: float, var_norm: float, n_nodes: int) -> tuple[float, float]:
     """Compute the feasible range of skewness for a bounded discrete distribution.

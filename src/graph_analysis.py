@@ -4,11 +4,32 @@ import numpy as np
 from scipy import stats
 from torch_geometric.data import Data
 from tqdm import tqdm
+from typing import Any
 
-from src.data_utils import pytorch_to_igraph, igraph_to_networkx, networkx_to_igraph
+from src.data_utils import pytorch_to_igraph
 
 
 logger = logging.getLogger(__name__)
+
+
+def compute_target_stats(g: ig.Graph) -> dict[str, Any]:
+    """Compute target statistics for graph generation.
+
+    Returns:
+        A dictionary containing:
+        - 'n_nodes': Number of nodes.
+        - 'n_edges': Number of edges.
+        - 'normalized_degree_moments': List of [mean, var, skew, kurt] (normalized).
+    """
+    n = g.vcount()
+    m = g.ecount()
+    
+    if n < 1: return {"n_nodes": n, "n_edges": m, "normalized_degree_moments": [0.0, 0.0, 0.0, 3.0]}
+
+    # Reuse standardized moment calculation logic
+    moments = count_deg_moments(g)
+
+    return {"n_nodes": n, "n_edges": m, "normalized_degree_moments": moments.tolist()}
 
 
 def aggregate_statistics(per_graph_stats: list[dict[str, float]]) -> dict[str, float]:
@@ -60,7 +81,7 @@ def analyze_single_graph(graph: ig.Graph) -> dict[str, float]:
         A dictionary containing absolute values for modularity, clustering,
         assortativity, degree moments (1-4), and motif counts (size 3-4).
     """
-    deg_moments = count_deg_moments(graph, n_moments=4)
+    deg_moments = count_deg_moments(graph)
     motifs = count_motifs(graph, k=4)
     modularity = calculate_modularity(graph)
     clustering = calculate_clustering_coefficient(graph)
@@ -136,32 +157,30 @@ def count_motifs(graph: ig.Graph, k: int, sampling_probs: list[float] | None = N
     return np.array(number_motifs)
 
 
-def count_deg_moments(graph: ig.Graph, n_moments: int = 4) -> np.ndarray:
-    """Computes the first n standardized moments of the graph's degree distribution.
+def count_deg_moments(graph: ig.Graph) -> np.ndarray:
+    """Computes the first n moments of the graph's degree distribution.
     
-    Args:
-        graph: Input igraph.Graph.
-        n_moments: Number of moments to compute (1 to 4).
     Returns:
-        NumPy array [mean, variance, skewness, kurtosis] (truncated to n_moments).
+        NumPy array [mean, variance, skewness, kurtosis].
     """
+    n = graph.vcount()
     degrees = np.array(graph.degree(), dtype=float)
-    if len(degrees) == 0:
-        return np.zeros(n_moments)
+    
+    if n == 0: return np.zeros(4)
+
+    # Normalize by size
+    degrees = degrees / max(n - 1, 1)
 
     m1 = float(np.mean(degrees))
-    if n_moments == 1:
-        return np.array([m1])
+    m2 = float(np.var(degrees, ddof=0))
 
-    m2 = float(np.var(degrees))
-    if n_moments == 2:
-        return np.array([m1, m2])
+    if m2 > 1e-10:
+        m3 = float(stats.skew(degrees, bias=False))
+        m4 = float(stats.kurtosis(degrees, bias=False)) + 3.0
+    else:
+        m3 = 0.0
+        m4 = 3.0
 
-    m3 = float(stats.skew(degrees)) if m2 > 1e-10 else 0.0
-    if n_moments == 3:
-        return np.array([m1, m2, m3])
-
-    m4 = float(stats.kurtosis(degrees)) + 3.0 if m2 > 1e-10 else 3.0
     return np.array([m1, m2, m3, m4])
 
 

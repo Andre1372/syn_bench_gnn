@@ -13,7 +13,7 @@ from tqdm import tqdm
 from tqdm.contrib.logging import logging_redirect_tqdm
 
 from src.log_utils import setup_console_logging
-from src.data_utils import remove_features, save_synthetic_dataset, load_all_synthetic_variants, get_split_indices
+from src.data_utils import remove_features, load_all_synthetic_variants, get_split_indices
 from src.generate_datasets import generate_synthetic_variants, KNOWN_METHODS
 from src.train_gnn import evaluate_dataset
 
