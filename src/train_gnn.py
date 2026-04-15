@@ -11,7 +11,7 @@ from sklearn.metrics import accuracy_score, f1_score, roc_auc_score
 from torch import nn, optim
 from torch_geometric.data import Data
 from torch_geometric.loader import DataLoader
-from torch_geometric.nn import GCNConv, GINConv, Sequential, global_add_pool
+from torch_geometric.nn import GCNConv, GINConv, Sequential, global_mean_pool, global_max_pool
 
 from src.data_utils import make_loaders
 from src.graph_analysis import aggregate_statistics, per_graph_statistics
@@ -41,13 +41,12 @@ class GCNGraphClassifier(nn.Module):
             layers.append((GCNConv(dim_in, hidden_dim), 'x, edge_index -> x'))
             layers.append(nn.BatchNorm1d(hidden_dim))
             layers.append(nn.ReLU(inplace=True))
-            layers.append(nn.Dropout(dropout))
 
         self.gnn = Sequential('x, edge_index', layers)
 
         # Final classification head
         self.head = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim),
+            nn.Linear(2 * hidden_dim, hidden_dim),
             nn.ReLU(inplace=True),
             nn.Dropout(dropout),
             nn.Linear(hidden_dim, num_classes)
@@ -56,7 +55,7 @@ class GCNGraphClassifier(nn.Module):
     def forward(self, x: torch.Tensor, edge_index: torch.Tensor, batch: torch.Tensor) -> torch.Tensor:
         """Forward pass for the GCN classifier."""
         x = self.gnn(x, edge_index)
-        x = global_add_pool(x, batch)
+        x = torch.cat([global_mean_pool(x, batch), global_max_pool(x, batch)], dim=1)
         return self.head(x)
 
 
@@ -92,7 +91,7 @@ class GINGraphClassifier(nn.Module):
 
         # Final classification head
         self.head = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim),
+            nn.Linear(2 * hidden_dim, hidden_dim),
             nn.ReLU(inplace=True),
             nn.Dropout(dropout),
             nn.Linear(hidden_dim, num_classes)
@@ -101,7 +100,7 @@ class GINGraphClassifier(nn.Module):
     def forward(self, x: torch.Tensor, edge_index: torch.Tensor, batch: torch.Tensor) -> torch.Tensor:
         """Forward pass for the GIN classifier."""
         x = self.gnn(x, edge_index)
-        x = global_add_pool(x, batch)
+        x = torch.cat([global_mean_pool(x, batch), global_max_pool(x, batch)], dim=1)
         return self.head(x)
 
 

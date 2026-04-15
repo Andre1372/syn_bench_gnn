@@ -25,8 +25,8 @@ from notebooks.visualization_utils import add_baseline_guide, plot_performance_d
 # Cell 1 - Global Variables & Data Loading
 RESULTS_DIR = PROJECT_ROOT / "results"
 DATASET_NAMES = ["MUTAG", "PROTEINS", "IMDB-BINARY"]
-BASE_METHOD_ORDER = ["padma", "pdd", "dummy_nodes", "dummy_edges"]
-PALETTE = {"original": "#5B9BD5", "padma": "#F5C431", "dummy_nodes": "#E06C75", "pdd": "#98C379", "dummy_edges": "#DA7CF7"}
+BASE_METHOD_ORDER = ["padma", "pdd", "dummyNodes", "dummyEdges"]
+PALETTE = {"original": "#5B9BD5", "padma": "#F5C431", "dummyNodes": "#E06C75", "pdd": "#98C379", "dummyEdges": "#DA7CF7"}
 
 def load_experiment_data() -> Tuple[pd.DataFrame, pd.DataFrame]:
     """Loads and preprocesses main GNN evaluation data and per-graph statistics."""
@@ -114,7 +114,7 @@ def compute_radar_bounds(df_pg_ds: pd.DataFrame, avg_v: float, avg_e: float) -> 
 
     return bounds
 
-def plot_performance_trajectory(df: pd.DataFrame, df_pg: pd.DataFrame, dataset: str, qq_metric: str = "modularity", variants_idx: list[int] | None = None) -> None:
+def plot_performance_trajectory(df: pd.DataFrame, df_pg: pd.DataFrame, dataset: str, qq_metric: str = "modularity", variants_idx: list[int] | None = None, analyze_motifs: bool = True) -> None:
     """Plots GNN performance trajectories, topological radar profiles, and Q-Q plots"""
     if df_pg.empty: raise ValueError("Per-graph statistics DataFrame (df_pg) is empty.")
     if qq_metric not in df_pg.columns: raise ValueError(f"Metric '{qq_metric}' not found in df_pg columns.")
@@ -126,7 +126,10 @@ def plot_performance_trajectory(df: pd.DataFrame, df_pg: pd.DataFrame, dataset: 
     if df_dataset.empty or df_pg_ds.empty or not methods: return
 
     # 1. Prepare Radar Data (Aggregation & Theoretical/Global Scaling)
-    all_metrics = ["modularity", "clustering", "assortativity", "efficiency"] + [f"deg_moment_{i}" for i in range(1, 5)] + [f"motif_count_{i}" for i in range(1, 9)]
+    topo_metrics = ["modularity", "clustering", "assortativity", "efficiency"]
+    moment_metrics = [f"deg_moment_{i}" for i in range(1, 5)]
+    motif_metrics = [f"motif_count_{i}" for i in range(1, 9)] if analyze_motifs else []
+    all_metrics = topo_metrics + moment_metrics + motif_metrics
     
     # Aggregate raw metrics by (method, variant, label) using the mean.
     df_agg_raw = df_pg_ds.groupby(["source_base", "source", "label"], observed=True)[all_metrics].mean().reset_index()
@@ -160,7 +163,9 @@ def plot_performance_trajectory(df: pd.DataFrame, df_pg: pd.DataFrame, dataset: 
 
     angles = np.linspace(0, 2 * np.pi, len(all_metrics), endpoint=False).tolist()
     angles += angles[:1]
-    metric_labels = ["Mod", "Clust", "Assort", "Eff"] + [f"M{i}" for i in range(1, 5)] + [f"Motif{i}" for i in range(1, 9)]
+    metric_labels = ["Mod", "Clust", "Assort", "Eff"] + [f"M{i}" for i in range(1, 5)]
+    if analyze_motifs:
+        metric_labels += [f"Motif{i}" for i in range(1, 9)]
 
     # Q-Q Shared Quantiles
     quantiles = np.linspace(0, 1, 100)
@@ -269,17 +274,18 @@ def plot_performance_trajectory(df: pd.DataFrame, df_pg: pd.DataFrame, dataset: 
     # Simplify column names for the table display to match Radar labels
     clean_cols = {"modularity": "Mod", "clustering": "Clust", "assortativity": "Assort", "efficiency": "Eff"}
     clean_cols.update({f"deg_moment_{i}": f"M{i}" for i in range(1, 5)})
-    clean_cols.update({f"motif_count_{i}": f"Motif{i}" for i in range(1, 9)})
+    if analyze_motifs:
+        clean_cols.update({f"motif_count_{i}": f"Motif{i}" for i in range(1, 9)})
     display(df_bounds.rename(columns=clean_cols))
 
-def display_detailed_statistics_table(df_pg: pd.DataFrame, dataset: str) -> None:
+def display_detailed_statistics_table(df_pg: pd.DataFrame, dataset: str, analyze_motifs: bool = True) -> None:
     df_pg_ds = df_pg[df_pg["dataset"] == dataset].copy()
     if df_pg_ds.empty: return
 
     acc_cols = [c for c in df_pg_ds.columns if c.startswith("mean_acc_")]
     topo_cols = [c for c in df_pg_ds.columns if c in ["modularity", "clustering", "assortativity", "efficiency"]]
     moment_cols = [c for c in df_pg_ds.columns if c.startswith("deg_moment_")]
-    motif_cols = [c for c in df_pg_ds.columns if c.startswith("motif_count_")]
+    motif_cols = [c for c in df_pg_ds.columns if c.startswith("motif_count_")] if analyze_motifs else []
     all_metrics = acc_cols + topo_cols + moment_cols + motif_cols
 
     # Group by source, split, AND label (class)
@@ -320,7 +326,8 @@ def display_detailed_statistics_table(df_pg: pd.DataFrame, dataset: str) -> None
     row_idx = [(s, sp) for s in srcs for sp in splits if (s, sp) in df_table.index]
     df_final = df_table.reindex(pd.MultiIndex.from_tuples(row_idx, names=["Method", "Split"]))
 
-    cat_order = ["Accuracy", "Topology", "Moments", "Motifs"]
+    cat_order = ["Accuracy", "Topology", "Moments"]
+    if analyze_motifs: cat_order.append("Motifs")
     # Sort columns: Category -> Metric -> Class
     sorted_cols = sorted(df_final.columns, key=lambda x: (cat_order.index(x[0]), x[1], x[2]))
     df_final = df_final[sorted_cols]
@@ -349,8 +356,8 @@ def display_detailed_statistics_table(df_pg: pd.DataFrame, dataset: str) -> None
     display(_styler(df_final.style))
 
 for ds in DATASETS:
-    plot_performance_trajectory(df_raw, df_pg_raw, ds, qq_metric="modularity", variants_idx=[1, 2, 3, 4, 5])
-    # display_detailed_statistics_table(df_pg_raw, ds)
+    plot_performance_trajectory(df_raw, df_pg_raw, ds, qq_metric="modularity", variants_idx=[1, 2, 3, 4, 5], analyze_motifs=True)
+    # display_detailed_statistics_table(df_pg_raw, ds, analyze_motifs=True)
 
 
 
@@ -363,7 +370,7 @@ def compute_delta_df(df: pd.DataFrame) -> pd.DataFrame:
 
 df_synth = compute_delta_df(df_raw)
 
-def plot_performance_overview(df: pd.DataFrame, df_synth: pd.DataFrame) -> None:
+def plot_performance_overview(df: pd.DataFrame, df_synth: pd.DataFrame, analyze_motifs: bool = True) -> None:
     n_ds = len(DATASETS)
     fig, axes = plt.subplots(nrows=n_ds, ncols=5, figsize=(20, 5 * n_ds + 1.0), sharex=False, sharey=False, squeeze=False, gridspec_kw={'width_ratios': [1, 1, 0.2, 1, 1]})
     fig.suptitle("GNN Classification Performance — Aggregated Overview", fontsize=16, fontweight="bold", y=1.1)
@@ -429,7 +436,7 @@ def plot_performance_overview(df: pd.DataFrame, df_synth: pd.DataFrame) -> None:
     plt.subplots_adjust(wspace=0.1)
     plt.show()
 
-def display_aggregated_summary(df: pd.DataFrame, df_synth: pd.DataFrame, df_pg: pd.DataFrame) -> None:
+def display_aggregated_summary(df: pd.DataFrame, df_synth: pd.DataFrame, df_pg: pd.DataFrame, analyze_motifs: bool = True) -> None:
     if df_pg.empty: return
 
     f1_agg = df.groupby(["dataset", "source_base", "model"], observed=True)["test_f1"].agg(["mean", "std"])
@@ -437,7 +444,7 @@ def display_aggregated_summary(df: pd.DataFrame, df_synth: pd.DataFrame, df_pg: 
     
     topo_base = ["modularity", "clustering", "assortativity", "efficiency"]
     moment_metrics = sorted([c for c in df_pg.columns if c.startswith("deg_moment_")])
-    motif_metrics = sorted([c for c in df_pg.columns if c.startswith("motif_count_")])
+    motif_metrics = sorted([c for c in df_pg.columns if c.startswith("motif_count_")]) if analyze_motifs else []
     all_topo = topo_base + moment_metrics + motif_metrics
     topo_agg = df_pg.groupby(["dataset", "source_base"], observed=True)[all_topo].agg(["mean", "std"])
     
@@ -448,7 +455,8 @@ def display_aggregated_summary(df: pd.DataFrame, df_synth: pd.DataFrame, df_pg: 
     for model in MODELS: c_tuples.append(("|Δ F1|", model))
     for m in topo_base: c_tuples.append(("Topology", m.capitalize()))
     for m in moment_metrics: c_tuples.append(("Moments", m.replace("deg_moment_", "M")))
-    for m in motif_metrics: c_tuples.append(("Motifs", m.replace("motif_count_", "")))
+    if analyze_motifs:
+        for m in motif_metrics: c_tuples.append(("Motifs", m.replace("motif_count_", "")))
     
     rows, r_tuples = [], []
     for ds in DATASETS:
@@ -494,5 +502,5 @@ def display_aggregated_summary(df: pd.DataFrame, df_synth: pd.DataFrame, df_pg: 
 
     display(_styler(df_res.style))
 
-plot_performance_overview(df_raw, df_synth)
-display_aggregated_summary(df_raw, df_synth, df_pg_raw)
+plot_performance_overview(df_raw, df_synth, analyze_motifs=True)
+display_aggregated_summary(df_raw, df_synth, df_pg_raw, analyze_motifs=True)

@@ -21,7 +21,7 @@ from src.padma.graph_generator import generate_graph as padma_generate_graph
 logger = logging.getLogger(__name__)
 
 
-KNOWN_METHODS: frozenset[str] = frozenset({"padma", "pdd", "dummy_nodes", "dummy_edges"})
+KNOWN_METHODS: frozenset[str] = frozenset({"padma", "pdd", "dummyNodes", "dummyEdges"})
 
 
 def generate_graph(target_stats: dict[str, Any], method: str, rng: np.random.Generator) -> nx.Graph:
@@ -69,13 +69,15 @@ def generate_graph(target_stats: dict[str, Any], method: str, rng: np.random.Gen
             )
 
         return G_nx
-    elif method == "dummy_nodes":
+    elif method == "dummyNodes":
         # A graph with the same number of nodes as the observed graph, with random number of edges.
         n_nodes = target_stats["n_nodes"]
-        p = rng.uniform(0, 0.5)
+        n_edges = target_stats["n_edges"]
+        p = n_edges / (n_nodes * (n_nodes - 1) / 2) + rng.uniform(-0.05, 0.05)
+        p = max(0, min(1, p))
         G_nx = nx.erdos_renyi_graph(n=n_nodes, p=p, seed=int(rng.integers(0, 2**31)))
         return G_nx
-    elif method == "dummy_edges":
+    elif method == "dummyEdges":
         # A graph with the same number of nodes and edges as the observed graph.
         n_nodes = target_stats["n_nodes"]
         n_edges = target_stats["n_edges"]
@@ -102,7 +104,7 @@ def generate_synthetic_variants(
 
     Args:
         dataset_name: Name of the TUDataset (e.g. ``"PROTEINS"``).
-        method: Generation method.  One of ``'padma'``, ``'pdd'``, ``'dummy_nodes'``, ``'dummy_edges'``.
+        method: Generation method.  One of ``'padma'``, ``'pdd'``, ``'dummyNodes'``, ``'dummyEdges'``.
         num_variants: Number of independent synthetic variants ``V`` to produce.
         rng: A seeded (or unseeded) NumPy random generator.
         project_root: Root directory of the project (used to locate configs).

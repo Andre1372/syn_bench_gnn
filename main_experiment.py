@@ -189,11 +189,11 @@ def main() -> None:
     test_epochs = 1 if args.quick_test else args.epochs
     gnn_config_base = {
         "num_runs"  : 1 if args.quick_test else args.gnn_runs,
-        "lr"        : 0.001,
+        "lr"        : 1e-4,
         "in_dim"    : 1,
-        "hidden_dim": 16 if args.quick_test else 64,
+        "hidden_dim": 16 if args.quick_test else 128,
         "num_layers": 1 if args.quick_test else 3,
-        "dropout"   : 0.3,
+        "dropout"   : 0.2,
     }
 
     for dataset_name in args.dataset:
