@@ -24,9 +24,15 @@ from notebooks.visualization_utils import add_baseline_guide, plot_performance_d
 
 # Cell 1 - Global Variables & Data Loading
 RESULTS_DIR = PROJECT_ROOT / "results"
-DATASET_NAMES = ["MUTAG", "PROTEINS", "IMDB-BINARY"]
-BASE_METHOD_ORDER = ["padma", "pdd", "dummyNodes", "dummyEdges"]
-PALETTE = {"original": "#5B9BD5", "padma": "#F5C431", "dummyNodes": "#E06C75", "pdd": "#98C379", "dummyEdges": "#DA7CF7"}
+DATASET_NAMES = ["DHFR", "MUTAG", "PROTEINS", "IMDB-BINARY", "DD"]
+BASE_METHOD_ORDER = ["padma", "pdd", "ergm", "dummyNodes", "dummyEdges"]
+PALETTE = {
+    "original": "#5B9BD5", 
+    "padma": "#F5C431", 
+    "pdd": "#E06C75",
+    "ergm": "#5CE9FF", 
+    "dummyNodes": "#98C379", 
+    "dummyEdges": "#DA7CF7"}
 
 def load_experiment_data() -> Tuple[pd.DataFrame, pd.DataFrame]:
     """Loads and preprocesses main GNN evaluation data and per-graph statistics."""

@@ -1,4 +1,6 @@
 import logging
+from collections import defaultdict
+
 import igraph as ig
 import numpy as np
 from scipy import stats
@@ -10,28 +12,6 @@ from src.data_utils import pytorch_to_igraph
 
 
 logger = logging.getLogger(__name__)
-
-
-def compute_target_stats(g: ig.Graph) -> dict[str, Any]:
-    """Compute target statistics for graph generation.
-
-    Returns:
-        A dictionary containing:
-        - 'n_nodes': Number of nodes.
-        - 'n_edges': Number of edges.
-        - 'normalized_degree_moments': List of [mean, var, skew, kurt] (normalized).
-        - 'motif_counts': List of motif counts.
-    """
-    n = g.vcount()
-    m = g.ecount()
-    
-    if n < 1: return {"n_nodes": n, "n_edges": m, "normalized_degree_moments": [0.0, 0.0, 0.0, 3.0]}
-
-    # Reuse standardized moment calculation logic
-    moments = count_deg_moments(g)
-    motifs = count_motifs(g, k=4)
-
-    return {"n_nodes": n, "n_edges": m, "normalized_degree_moments": moments.tolist(), "motif_counts": motifs.tolist()}
 
 
 def aggregate_statistics(per_graph_stats: list[dict[str, float]]) -> dict[str, float]:
@@ -53,6 +33,28 @@ def aggregate_statistics(per_graph_stats: list[dict[str, float]]) -> dict[str, f
         mean_stats[key] = float(np.mean([stat[key] for stat in per_graph_stats]))
 
     return mean_stats
+
+
+def aggregate_statistics_per_class(data_list: list[Data], per_graph_stats: list[dict[str, float]]) -> dict[str, dict[str, float]]:
+    """Computes the mean for network statistics across the dataset, grouped by class label.
+
+    Args:
+        data_list: List of PyG Data graphs.
+        per_graph_stats: List of dictionaries containing absolute statistics for each graph.
+    Returns:
+        A dictionary mapping class labels (as strings) to a dictionary of aggregated statistics.
+    """
+    class_groups = defaultdict(list)
+    for data, stats in zip(data_list, per_graph_stats):
+        label = int(data.y.item())
+        class_groups[label].append(stats)
+        
+    class_stats = {}
+    for label, stats_list in class_groups.items():
+        if stats_list:
+            class_stats[str(label)] = aggregate_statistics(stats_list)
+            
+    return class_stats
 
 
 def per_graph_statistics(data_list: list[Data], show_progress: bool = False) -> list[dict[str, float]]:

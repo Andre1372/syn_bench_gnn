@@ -10,7 +10,7 @@ import igraph as ig
 import torch
 
 from src.padma.graph_generator import generate_graph as padma_generate_graph
-from src.graph_analysis import compute_target_stats
+from src.graph_analysis import count_deg_moments
 
 from src.data_utils import (
     networkx_to_igraph, 
@@ -213,7 +213,11 @@ def ergm_fit_sample(
     
     # 2. Generate initial state
     _log(f"[{experiment_name}] Generating initial state via {init_method}")
-    target_stats = compute_target_stats(observed_ig)
+    target_stats = {
+        "n_nodes": observed_ig.vcount(),
+        "n_edges": observed_ig.ecount(),
+        "normalized_degree_moments": count_deg_moments(observed_ig).tolist()
+    }
     initial_nx, _ = padma_generate_graph(target_stats, rng_init)
     initial_ig = networkx_to_igraph(initial_nx)
     _log(f"[{experiment_name}] Initial state generated with {initial_ig.vcount()} nodes and {initial_ig.ecount()} edges.")

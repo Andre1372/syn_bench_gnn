@@ -1,12 +1,10 @@
 """Utilities for loading original and synthetic graph datasets."""
 
 import logging
-import sys
 from pathlib import Path
 from typing import Any
 
 import torch
-import yaml
 import numpy as np
 import igraph as ig
 import networkx as nx
@@ -16,6 +14,7 @@ from torch_geometric.loader import DataLoader
 from torch_geometric.datasets import TUDataset
 from torch_geometric.utils import to_undirected
 
+
 logger = logging.getLogger(__name__)
 
 
@@ -23,7 +22,7 @@ logger = logging.getLogger(__name__)
 # Load data utilities
 # ------------------------------------------------------------------
 
-class SyntheticDataset(InMemoryDataset):
+class DatasetPT(InMemoryDataset):
     """An InMemoryDataset loaded from a .pt file.
 
     This class wraps a synthetic dataset previously generated and serialized
@@ -118,62 +117,80 @@ def remove_features(data: Data) -> Data:
     return new_data
 
 
-def load_single_graph(dataset_name: str, graph_index: int, data_dir: Path | None = None, return_label: bool = False) -> ig.Graph | tuple[ig.Graph, torch.Tensor]:
-    """Loads a graph from a TUDataset and sanitizes its topology.
-
-    Downloads the specified dataset (if not cached), extracts the graph at the
-    given index, and topologically projects it to a valid simple undirected
-    graph by removing self-loops and multiple edges.
-
-    Args:
-        dataset_name: The name of the TUDataset to load (e.g., "PROTEINS").
-        graph_index: The index of the graph within the dataset.
-        data_dir: The directory path for caching the dataset.
-        return_label: If True, returns a tuple (graph, label).
-    Returns:
-        A sanitized ig.Graph object or (ig.Graph, torch.Tensor).
-    Raises:
-        IndexError: If the graph_index is out of the dataset bounds.
-        ValueError: If the selected graph lacks edge indices.
+def get_target_stats(dataset_obj: DatasetPT, idx: int) -> dict[str, Any]:
+    """Retrieves target statistics (nodes, edges, moments) for a graph from .pt metadata.
+    
+    If metadata is unavailable, raises error.
     """
-    if data_dir is None: data_dir = Path("data")
+    metadata = dataset_obj.metadata
+    orig_per_graph_stats = metadata.get("per_graph_statistics", [])
 
-    data_dir.mkdir(parents=True, exist_ok=True)
-
-    dataset = TUDataset(root=str(data_dir), name=dataset_name)
-    if graph_index < 0 or graph_index >= len(dataset):
-        raise IndexError(
-            f"Graph index {graph_index} is out of bounds for dataset {dataset_name} "
-            f"of size {len(dataset)}."
-        )
-
-    data = dataset[graph_index]
-
-    edge_index = data.edge_index.numpy()
-    num_nodes = data.num_nodes
-
-    g = ig.Graph(n=num_nodes, edges=list(zip(edge_index[0], edge_index[1])), directed=False)
-
-    # Sanitize graph geometry: remove self-loops and multi-edges in an optimal way
-    g.simplify(multiple=True, loops=True, combine_edges=None)
-
-    return g, data.y if return_label else g
+    if not orig_per_graph_stats:
+        raise ValueError(f"No per_graph_statistics found in metadata for dataset {dataset_obj}.")
+    
+    if idx < len(orig_per_graph_stats):
+        pgs = orig_per_graph_stats[idx]
+        return {
+            "n_nodes": int(pgs.get("n_nodes")),
+            "n_edges": int(pgs.get("n_edges")),
+            "normalized_degree_moments": [
+                pgs.get("deg_moment_1"), pgs.get("deg_moment_2"),
+                pgs.get("deg_moment_3"), pgs.get("deg_moment_4")
+            ]
+        }
+    raise ValueError(f"No metadata found for graph {idx}.")
 
 
-def load_all_synthetic_variants(synth_dir: Path, source_label: str, dataset_name: str) -> list[tuple[list[Data], str, list[int] | None]]:
-    """Scans the directory and loads all synthetic variant datasets.
+def preprocess_and_save_original_dataset(dataset_name: str, data_dir: Path) -> tuple[list[Data], dict[str, Any]]:
+    """Preprocesses a TUDataset, removes features, computes statistics, and saves to .pt.
+    
+    Args:
+        dataset_name: Name of the TUDataset.
+        data_dir: Directory where the original dataset will be downloaded and saved.
+    Returns:
+        The preprocessed list of Data objects and the metadata dictionary.
+    """
+    orig_pt_path = data_dir / dataset_name / f"{dataset_name}_original.pt"
+    
+    logger.info(f"Preprocessing and computing statistics for original dataset: {dataset_name}...")
+    raw_dataset = TUDataset(root=str(data_dir), name=dataset_name)
+    num_classes = raw_dataset.num_classes
+
+    # Remove node features completely for topology-only learning
+    original_data_list = [remove_features(d) for d in raw_dataset]
+
+    from src.graph_analysis import per_graph_statistics, aggregate_statistics_per_class
+    orig_stats = per_graph_statistics(original_data_list, show_progress=True)
+    orig_agg_class = aggregate_statistics_per_class(original_data_list, orig_stats)
+
+    orig_metadata = {
+        "source": "original",
+        "dataset_name": dataset_name,
+        "num_classes": num_classes,
+        "per_graph_statistics": orig_stats,
+        "aggregate_statistics_per_class": orig_agg_class,
+    }
+
+    save_synthetic_dataset(
+        dataset_list=original_data_list,
+        output_dir=orig_pt_path.parent,
+        filename=orig_pt_path.name,
+        extra_metadata=orig_metadata
+    )
+
+    return original_data_list, orig_metadata
+
+
+def load_all_synthetic_variants(synth_dir: Path, dataset_name: str) -> list[Path]:
+    """Scans the directory and returns paths to all synthetic variant datasets.
 
     Args:
         synth_dir: Directory containing the `.pt` files.
-        source_label: Label for the data source (e.g., 'padma').
         dataset_name: Name of the original dataset.
     Returns:
-        A list of tuples containing:
-            - The list of PyG Data objects.
-            - The qualified source name (e.g., 'padma_0').
-            - The list of seeds (if available, else None).
+        A list of paths to `.pt` files.
     """
-    variants: list[tuple[list[Data], str, list[int] | None]] = []
+    variants: list[Path] = []
     
     # Iteratively find sequential .pt files (v0, v1, ...) until not found
     v = 0
@@ -182,15 +199,7 @@ def load_all_synthetic_variants(synth_dir: Path, source_label: str, dataset_name
         if not pt_path.exists():
             break
 
-        synth_dataset_obj = SyntheticDataset(pt_path)
-        synth_data_list = [synth_dataset_obj[i] for i in range(len(synth_dataset_obj))]
-        
-        # Try to retrieve seeds from metadata if present
-        seeds = synth_dataset_obj.metadata.get("seeds")
-
-        qualified_source = f"{source_label}_{v}"
-        variants.append((synth_data_list, qualified_source, seeds))
-        
+        variants.append(pt_path)
         v += 1
         
     if v == 0:
@@ -223,45 +232,6 @@ def save_synthetic_dataset(dataset_list: list[Data], output_dir: Path, filename:
     
     torch.save(payload, output_dir / filename)
     logger.info(f"Saved synthetic dataset ({len(dataset_list)} graphs) to '{output_dir / filename}'.")
-
-
-def save_synthetic_variants(
-    synth_datasets: list[list[Data]],
-    seeds: list[list[int]],
-    dataset_name: str,
-    num_synth_datasets: int,
-    method: str,
-    project_root: Path,
-) -> None:
-    """Persists synthetic samples to disk under separate subfolders.
-
-    The output layout is::
-        synthetic_data/<dataset_name>/<method>/
-
-    Args:
-        synth_datasets: V lists of Data objects from the method generator.
-        seeds: V lists of seeds used for each graph.
-        dataset_name: Original dataset name.
-        num_synth_datasets: Number of variants V.
-        method: Method used.
-        project_root: Project root directory.
-    """
-    save_dir = project_root / "synthetic_data" / dataset_name / method
-
-    for v, (synth_list, seed_list) in enumerate(zip(synth_datasets, seeds)):
-        filename = f"{dataset_name}_synth_v{v}.pt"
-        save_synthetic_dataset(
-            synth_list, 
-            save_dir, 
-            filename,
-            extra_metadata={
-                "source": method, 
-                "dataset_name": dataset_name,
-                "variant_idx": v,
-                "num_synth_datasets": num_synth_datasets,
-                "seeds": seed_list
-            }
-        )
 
 
 # ------------------------------------------------------------------

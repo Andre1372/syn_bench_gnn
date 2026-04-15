@@ -12,8 +12,8 @@ from torch_geometric.datasets import TUDataset
 from tqdm import tqdm
 from tqdm.contrib.logging import logging_redirect_tqdm
 
-from src.data_utils import igraph_to_pytorch, networkx_to_igraph, igraph_to_networkx, pytorch_to_igraph, save_synthetic_dataset, remove_features
-from src.graph_analysis import compute_target_stats
+from src.data_utils import DatasetPT, preprocess_and_save_original_dataset, get_target_stats, igraph_to_pytorch, networkx_to_igraph, igraph_to_networkx, pytorch_to_igraph, save_synthetic_dataset, remove_features
+from src.graph_analysis import per_graph_statistics, aggregate_statistics_per_class
 
 from src.padma.graph_generator import generate_graph as padma_generate_graph
 from src.ergm.graph_generator import ergm_fit_sample
@@ -180,20 +180,30 @@ def generate_synthetic_variants(
             f"Supported values: {sorted(KNOWN_METHODS)}."
         )
 
-    dataset = TUDataset(root=str(project_root / "data"), name=dataset_name)
+    
+    orig_pt_path = project_root / "data" / dataset_name / f"{dataset_name}_original.pt"
+    if not orig_pt_path.exists():
+        preprocess_and_save_original_dataset(dataset_name, project_root / "data")
+        
+    dataset_obj = DatasetPT(orig_pt_path)
+    metadata = dataset_obj.metadata
+    
+    # original statistics are already saved inside the metadata
+    orig_per_graph_stats = metadata.get("per_graph_statistics", [])
 
     # variant_datasets[v] will hold one PyG Data object per original graph
     variant_datasets: list[list[Data]] = [[] for _ in range(num_variants)]
     variant_seeds:    list[list[int]]  = [[] for _ in range(num_variants)]
 
     with logging_redirect_tqdm():
-        pbar = tqdm(enumerate(dataset), total=len(dataset), desc=f"Phase A [{dataset_name}/{method}]")
-        for i, data in pbar:
+        pbar = tqdm(range(len(dataset_obj)), desc=f"Phase A [{dataset_name}/{method}]")
+        for i in pbar:
+            data = dataset_obj[i]
             obs_ig = pytorch_to_igraph(data)
             
-            # Precompute target statistics
-            target_stats = compute_target_stats(obs_ig)
-            if method == "pdd":
+            target_stats = get_target_stats(dataset_obj, i)
+                
+            if method == "pdd" or method == "ergm":
                 target_stats["observed_nx"] = igraph_to_networkx(obs_ig)
 
             for v in range(num_variants):
@@ -214,16 +224,19 @@ def generate_synthetic_variants(
     # Persist each variant to disk
     for v, (graphs, seeds) in enumerate(zip(variant_datasets, variant_seeds)):
         filename = f"{dataset_name}_synth_v{v}.pt"
-        save_synthetic_dataset(
-            dataset_list=graphs,
-            output_dir=output_dir,
-            filename=filename,
-            extra_metadata={
-                "source": method,
-                "dataset_name": dataset_name,
-                "variant_idx": v,
-                "num_variants": num_variants,
-                "seeds": seeds,
-            },
-        )
+        
+        synth_stats = per_graph_statistics(graphs, show_progress=False)
+        synth_agg_class = aggregate_statistics_per_class(graphs, synth_stats)
+        
+        metadata = {
+            "source": method,
+            "dataset_name": dataset_name,
+            "variant_idx": v,
+            "num_variants": num_variants,
+            "seeds": seeds,
+            "per_graph_statistics": synth_stats,
+            "aggregate_statistics_per_class": synth_agg_class,
+        }
+        
+        save_synthetic_dataset(graphs, output_dir, filename, extra_metadata=metadata)
         logger.info(f"Saved variant {v + 1}/{num_variants} for {dataset_name}/{method} → {output_dir / filename}")

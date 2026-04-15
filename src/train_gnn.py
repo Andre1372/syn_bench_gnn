@@ -13,8 +13,8 @@ from torch_geometric.data import Data
 from torch_geometric.loader import DataLoader
 from torch_geometric.nn import GCNConv, GINConv, Sequential, global_mean_pool, global_max_pool
 
-from src.data_utils import make_loaders
-from src.graph_analysis import aggregate_statistics, per_graph_statistics
+from src.data_utils import make_loaders, DatasetPT, remove_features
+from src.graph_analysis import per_graph_statistics, aggregate_statistics_per_class
 
 logger = logging.getLogger(__name__)
 
@@ -293,36 +293,25 @@ def run_single_experiment(model: nn.Module, dataset: list[Data], run_id: int, de
 
 
 def evaluate_dataset(
-    data_list: list[Data],
+    pt_path: str | Path,
     gnn_config: dict[str, Any],
     device: torch.device,
     split_indices: tuple[list[int], list[int], list[int]],
     dataset_name: str,
     epochs: int,
     batch_size: int,
-    orig_data_list: list[Data] | None = None,
-    source: str = "original",
-    seeds: list[int | None] | None = None,
     pbar: Any = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """Runs a full suite of GNN evaluations on a list of graphs.
+    """Runs a full suite of GNN evaluations loading data from a .pt file.
 
     Args:
-        data_list: List of PyG Data objects (the evaluated dataset).
+        pt_path: Path to the .pt file containing the dataset and metadata.
         gnn_config: Dictionary of model parameters and hyperparameters.
-            Required keys: ``num_runs``, ``lr``, ``in_dim``, ``hidden_dim``,
-            ``num_layers``, ``num_classes``, ``dropout``.
         device: Torch device to run training on.
         split_indices: Pre-computed ``(train_idx, val_idx, test_idx)`` index lists.
         dataset_name: Dataset name written verbatim to each result row.
         epochs: Number of training epochs per GNN run.
         batch_size: Mini-batch size for DataLoaders.
-        orig_data_list: Optional reference dataset used to compute structural
-            error metrics.  Pass ``None`` to skip error computation.
-        source: Source identifier written verbatim to each result row.
-            Use ``'original'`` for the unmodified dataset, or a variant-indexed
-            label such as ``'pdd_2'`` for synthetic data.
-        seeds: Optional list of RNG seeds used to generate each graph.
         pbar: Optional tqdm progress bar to update (one step per run).
     Returns:
         A tuple containing:
@@ -339,12 +328,38 @@ def evaluate_dataset(
     global_results: list[dict[str, Any]] = []
     per_graph_results: list[dict[str, Any]] = []
 
-    global_stats: dict[str, float] = {}
+    dataset_obj = DatasetPT(pt_path)
+    data_list = [dataset_obj[i] for i in range(len(dataset_obj))]
+    metadata = dataset_obj.metadata
+
+    source = metadata.get("source", "original")
+    if "variant_idx" in metadata:
+        source = f"{source}_{metadata['variant_idx']}"
+        
+    seeds = metadata.get("seeds", None)
+
+    global_stats_list: list[dict[str, Any]] = []
     per_graph_stats: list[dict[str, float]] = []
-    if orig_data_list is not None:
-        logger.debug("Computing network statistics for %s...", source)
-        per_graph_stats = per_graph_statistics(data_list)
-        global_stats = aggregate_statistics(per_graph_stats)
+
+    if "per_graph_statistics" in metadata:
+         per_graph_stats = metadata["per_graph_statistics"]
+    if "aggregate_statistics_per_class" in metadata:
+        for cls_label, cls_stats in metadata["aggregate_statistics_per_class"].items():
+            class_dict = {"graph_class": cls_label}
+            for stat_name, stat_val in cls_stats.items():
+                class_dict[stat_name] = stat_val
+            global_stats_list.append(class_dict)
+                
+    if not per_graph_stats:
+        logger.debug("Computing network statistics locally for %s...", source)
+        local_pg_stats = per_graph_statistics(data_list)
+        per_graph_stats = local_pg_stats
+        agg_class = aggregate_statistics_per_class(data_list, local_pg_stats)
+        for cls_label, cls_stats in agg_class.items():
+            class_dict = {"graph_class": cls_label}
+            for stat_name, stat_val in cls_stats.items():
+                class_dict[stat_name] = stat_val
+            global_stats_list.append(class_dict)
 
     # Accumulate correctness counts across all runs for each model
     num_graphs = len(data_list)
@@ -377,13 +392,14 @@ def evaluate_dataset(
 
             n_correct[model_name] += get_per_graph_predictions(model, data_list, device, batch_size)
 
-            global_results.append({
-                "dataset": dataset_name,
-                "source": source,
-                "model": model_name,
-                **run_result,
-                **global_stats,
-            })
+            for cls_stats in global_stats_list:
+                global_results.append({
+                    "dataset": dataset_name,
+                    "source": source,
+                    "model": model_name,
+                    **run_result,
+                    **cls_stats,
+                })
         
         if pbar: pbar.update(1)
 

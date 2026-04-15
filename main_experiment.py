@@ -13,10 +13,9 @@ from tqdm import tqdm
 from tqdm.contrib.logging import logging_redirect_tqdm
 
 from src.log_utils import setup_console_logging
-from src.data_utils import remove_features, load_all_synthetic_variants, get_split_indices
+from src.data_utils import load_all_synthetic_variants, get_split_indices, preprocess_and_save_original_dataset, DatasetPT
 from src.generate_datasets import generate_synthetic_variants, KNOWN_METHODS
 from src.train_gnn import evaluate_dataset
-
 
 # ---------------------------------------------------------------------------
 # CLI
@@ -113,8 +112,7 @@ def parse_arguments() -> argparse.Namespace:
 
 def _write_csv(rows: list[dict], path: Path) -> None:
     """Writes a list of dicts to a CSV file, creating parent dirs as needed."""
-    if not rows:
-        return
+    if not rows: return
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", newline="", encoding="utf-8") as fh:
         writer = csv.DictWriter(fh, fieldnames=list(rows[0].keys()))
@@ -154,11 +152,12 @@ def main() -> None:
         logger.info("=" * 60)
 
         for dataset_name in args.dataset:
+            # Preprocess and save, guaranteeing topology stripping
+            preprocess_and_save_original_dataset(dataset_name, project_root / "data")
+
             for method in args.methods:
                 logger.info(f"--- Generating: dataset={dataset_name}  method={method} ---")
-                output_dir = (
-                    project_root / "synthetic_data" / dataset_name / method
-                )
+                output_dir = project_root / "synthetic_data" / dataset_name / method
                 generate_synthetic_variants(
                     dataset_name=dataset_name,
                     method=method,
@@ -201,12 +200,16 @@ def main() -> None:
         logger.info(f"DATASET: {dataset_name}")
         logger.info("─" * 60)
 
-        raw_dataset = TUDataset(root="data", name=dataset_name)
-        original_data_list = [remove_features(d) for d in raw_dataset]
+        orig_pt_path = project_root / "data" / dataset_name / f"{dataset_name}_original.pt"
+        if not orig_pt_path.exists():
+            preprocess_and_save_original_dataset(dataset_name, project_root / "data")
 
+        orig_dataset_obj = DatasetPT(orig_pt_path)
+        original_data_list = [orig_dataset_obj[i] for i in range(len(orig_dataset_obj))]
+        
         gnn_config = {
             **gnn_config_base,
-            "num_classes": raw_dataset.num_classes,
+            "num_classes": orig_dataset_obj.metadata.get("num_classes"),
         }
 
         # Shared train/val/test split (fixed across all methods for comparability)
@@ -223,16 +226,13 @@ def main() -> None:
             with tqdm(total=orig_gnn_config["num_runs"], desc=f"GNN [Original/{dataset_name}]") as pbar:
                 with logging_redirect_tqdm():
                     glob_res, pg_res = evaluate_dataset(
-                        data_list=original_data_list,
+                        pt_path=orig_pt_path,
                         gnn_config=orig_gnn_config,
                         device=device,
                         split_indices=split_indices,
                         dataset_name=dataset_name,
                         epochs=test_epochs,
                         batch_size=args.batch_size,
-                        orig_data_list=original_data_list,
-                        source="original",
-                        seeds=None,
                         pbar=pbar,
                     )
             _write_csv(glob_res, results_dir / f"gnn_eval_{dataset_name}_original.csv")
@@ -243,7 +243,7 @@ def main() -> None:
         for method in args.methods:
             logger.info(f"Evaluating method: {method}")
             base_synth_dir = project_root / "synthetic_data" / dataset_name / method
-            eval_tasks = load_all_synthetic_variants(base_synth_dir, method, dataset_name)
+            eval_tasks = load_all_synthetic_variants(base_synth_dir, dataset_name)
 
             if not eval_tasks:
                 logger.warning(f"No synthetic data found for dataset={dataset_name} method={method} - skipping.")
@@ -254,19 +254,16 @@ def main() -> None:
             
             with tqdm(total=len(eval_tasks)*gnn_config["num_runs"], desc=f"GNN [{method.upper()}/{dataset_name}]") as pbar:
                 with logging_redirect_tqdm():
-                    for data_list, source_label, seeds in eval_tasks:
-                        logger.debug(f"Evaluating {source_label} ({len(data_list)} graphs).")
+                    for pt_path in eval_tasks:
+                        logger.debug(f"Evaluating path: {pt_path}.")
                         glob_res, pg_res = evaluate_dataset(
-                            data_list=data_list,
+                            pt_path=pt_path,
                             gnn_config=gnn_config,
                             device=device,
                             split_indices=split_indices,
                             dataset_name=dataset_name,
                             epochs=test_epochs,
                             batch_size=args.batch_size,
-                            orig_data_list=original_data_list,
-                            source=source_label,
-                            seeds=seeds,
                             pbar=pbar,
                         )
                         all_results.extend(glob_res)
