@@ -32,19 +32,19 @@ def _find_skewness_bounds(mean_norm: float, var_norm: float, n_nodes: int) -> tu
     if std_norm < 1e-10:
         return 0.0, 0.0
 
-    # For a bounded distribution on [a, b], skewness is bounded by:
-    #   |skew| ≤ (b - a) / std × (1 - 2×p) / sqrt(p×(1-p))  [approximate]
-    # A simpler conservative estimate from the Pearson inequalities:
-    #   skew_min ≈ -mean_norm / std_norm
-    #   skew_max ≈  (1 - mean_norm) / std_norm
-    # (these are the third-moment limits for a two-point distribution)
-    min_skew = -mean_norm / std_norm
-    max_skew = (1.0 - mean_norm) / std_norm
+    # Skewness is equal to E[(X - mu)^3] / sigma^3
+    # Since (-mu) < (X - mu) < (1 - mu)
+    # E[skew] <= (1-mu) / sigma^3 * E[(X-mu)^2] = (1-mu) / sigma
+    # E[skew] >= (-mu) / sigma^3 * E[(X-mu)^2] = (-mu) / sigma
+    # min_skew = (-mean_norm) / std_norm
+    # max_skew = (1 - mean_norm) / std_norm
+    min_skew = -1
+    max_skew = 1
 
-    # Cap to reasonable range to avoid extreme values on small graphs
-    cap = max(3.0, np.sqrt(n_nodes))
-    min_skew = max(min_skew, -cap)
-    max_skew = min(max_skew, cap)
+    # Pearson's bound for finite samples
+    sqrt_n = np.sqrt(n_nodes)
+    min_skew = max(min_skew, -sqrt_n)
+    max_skew = min(max_skew, sqrt_n)
 
     return float(min_skew), float(max_skew)
 
@@ -63,16 +63,14 @@ def _find_kurtosis_bounds(mean_norm: float, var_norm: float, skewness: float, n_
     # Pearson lower bound for raw kurtosis: kurt ≥ skew² + 1
     min_kurt = skewness ** 2 + 1.0
 
-    # Upper bound: kurtosis of a Bernoulli (two-point) distribution on [0,1]
-    # For p ≈ mean_norm:  kurt = (1 - 6×p×(1-p)) / (p×(1-p))
-    p = np.clip(mean_norm, 1e-6, 1 - 1e-6)
-    pq = p * (1.0 - p)
-    max_kurt_bernoulli = (1.0 - 6.0 * pq) / pq if pq > 1e-10 else 99.0
-    max_kurt = max(max_kurt_bernoulli, min_kurt + 1.0)
+    # Kurtosis is equal to E[(X - mu)^4] / sigma^4
+    # Since (X - mu)^2 <= max(mu^2, (1 - mu)^2)
+    # E[kurt] <= max(mu^2, (1 - mu)^2) / sigma^4 * E[(X-mu)^2]
+    # max_kurt = max(mean_norm**2, (1 - mean_norm)**2) / var_norm
+    max_kurt = float('inf')
 
-    # Apply a practical cap
-    cap = max(10.0, n_nodes)
-    max_kurt = min(max_kurt, cap)
+    # Upper bound for finite samples
+    max_kurt = min(max_kurt, n_nodes)
 
     return float(min_kurt), float(max_kurt)
 

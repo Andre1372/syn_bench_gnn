@@ -2,6 +2,7 @@
 # To install manually before
 # pip install torch
 # pip install torch-geometric
+# pip install torch-scatter torch-sparse
 # ------------------------
 
 # PyG Dependencies

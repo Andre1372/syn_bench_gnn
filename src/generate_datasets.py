@@ -16,12 +16,13 @@ from src.data_utils import igraph_to_pytorch, networkx_to_igraph, igraph_to_netw
 from src.graph_analysis import compute_target_stats
 
 from src.padma.graph_generator import generate_graph as padma_generate_graph
+from src.ergm.graph_generator import ergm_fit_sample
 
 
 logger = logging.getLogger(__name__)
 
 
-KNOWN_METHODS: frozenset[str] = frozenset({"padma", "pdd", "dummyNodes", "dummyEdges"})
+KNOWN_METHODS: frozenset[str] = frozenset({"padma", "pdd", "ergm", "dummyNodes", "dummyEdges"})
 
 
 def generate_graph(target_stats: dict[str, Any], method: str, rng: np.random.Generator) -> nx.Graph:
@@ -69,6 +70,66 @@ def generate_graph(target_stats: dict[str, Any], method: str, rng: np.random.Gen
             )
 
         return G_nx
+    elif method == "ergm":
+        # Exponential Random Graph Model estimation and sampling.
+        if "observed_nx" not in target_stats:
+            raise ValueError("Method 'ergm' requires 'observed_nx' in target_stats.")
+        
+        # We need a configuration directory or a default config for ERGM.
+        # Let's check for a default yaml config in the project root.
+        config_path = Path("src/ergm/default_config.yaml")
+        if not config_path.exists():
+            # Create a basic default config if it doesn't exist
+            default_config = {
+                "statistics": 4,
+                "strategy": {"name": "MultipleEdgeSwapStrategy", "args": {}},
+                "estimation": {
+                    "updates": 300,
+                    "learning_rate": 0.1,
+                    "lr_decay": 0.95,
+                    "clip_gradient_norm": 10.0,
+                    "covariance_update_interval": 5,
+                    "covariance_update_alpha": 0.25,
+                    "final_samples": 5
+                },
+                "activation_strategy": {"name": "ErrorThresholdActivationStrategy", "args": {"initial_h": 4}},
+                "early_stopping": {"patience": 20, "alpha": 0.75, "acc_rate_target": 0.2}
+            }
+            config_path.parent.mkdir(parents=True, exist_ok=True)
+            import yaml
+            with config_path.open("w") as f:
+                yaml.dump(default_config, f)
+        
+        import yaml
+        with config_path.open("r") as f:
+            config_dict = yaml.safe_load(f)
+        
+        # Set experiment name for logging
+        experiment_name = f"ergm_gen_{rng.integers(0, 100000)}"
+        
+        # We use 'padma' for initialisation by default if not specified
+        init_method = "padma"
+
+        # project_root is assumed to be current dir in this context.
+        project_root = Path(".")
+        
+        _, synth_igraphs = ergm_fit_sample(
+            observed_nx=target_stats["observed_nx"],
+            config_dict=config_dict,
+            init_method=init_method,
+            project_root=project_root,
+            experiment_name=experiment_name,
+            seed=int(rng.integers(0, 2**31)),
+            n_samples=1,
+            show_progress=False,
+            verbose=False,
+            save_results=False
+        )
+        
+        if not synth_igraphs:
+            raise RuntimeError("ERGM failed to generate any synthetic samples.")
+            
+        return igraph_to_networkx(synth_igraphs[0])
     elif method == "dummyNodes":
         # A graph with the same number of nodes as the observed graph, with random number of edges.
         n_nodes = target_stats["n_nodes"]

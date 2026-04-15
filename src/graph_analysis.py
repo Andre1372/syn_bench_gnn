@@ -20,6 +20,7 @@ def compute_target_stats(g: ig.Graph) -> dict[str, Any]:
         - 'n_nodes': Number of nodes.
         - 'n_edges': Number of edges.
         - 'normalized_degree_moments': List of [mean, var, skew, kurt] (normalized).
+        - 'motif_counts': List of motif counts.
     """
     n = g.vcount()
     m = g.ecount()
@@ -28,8 +29,9 @@ def compute_target_stats(g: ig.Graph) -> dict[str, Any]:
 
     # Reuse standardized moment calculation logic
     moments = count_deg_moments(g)
+    motifs = count_motifs(g, k=4)
 
-    return {"n_nodes": n, "n_edges": m, "normalized_degree_moments": moments.tolist()}
+    return {"n_nodes": n, "n_edges": m, "normalized_degree_moments": moments.tolist(), "motif_counts": motifs.tolist()}
 
 
 def aggregate_statistics(per_graph_stats: list[dict[str, float]]) -> dict[str, float]:

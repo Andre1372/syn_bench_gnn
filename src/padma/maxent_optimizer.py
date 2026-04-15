@@ -17,7 +17,8 @@ def maxent_optimize_discrete(target_sum, target_var, n_samples, max_value,
                              target_skew=None, target_kurt=None, debug=False, rng=None,
                              var_penalty_weight=1.0,
                              skew_penalty_weight=0.5,
-                             kurt_penalty_weight=0.5):
+                             kurt_penalty_weight=0.5,
+                             min_value=0):
     """
     Generate discrete distribution using simulated annealing with entropy maximization.
     
@@ -33,6 +34,7 @@ def maxent_optimize_discrete(target_sum, target_var, n_samples, max_value,
         target_var: target variance
         n_samples: number of samples to generate (e.g., n_nodes for degrees, n_features for feature means)
         max_value: maximum possible value (e.g., max_degree, or n_nodes for feature counts)
+        min_value: minimum possible value for each sample
         target_skew: optional target skewness
         target_kurt: optional target kurtosis
         var_penalty_weight: penalty weight for variance loss
@@ -40,17 +42,33 @@ def maxent_optimize_discrete(target_sum, target_var, n_samples, max_value,
         kurt_penalty_weight: penalty weight for kurtosis loss
         
     Returns:
-        x_values: array of possible values [0, 1, ..., max_value]
-        counts: array of length n_samples with the actual sampled values (each in [0, max_value])
+        x_values: array of possible values [min_value, ..., max_value]
+        counts: array of length n_samples with the actual sampled values (each in [min_value, max_value])
     """
+    if rng is None: rng = np.random.default_rng()
+
     # Caller must ensure target_sum is valid (e.g., even for degrees)
-    if rng is None:
-        rng = np.random.default_rng()
+    min_value = int(min_value)
+    max_value = int(max_value)
+    if min_value < 0:
+        raise ValueError(f"min_value must be >= 0, got {min_value}")
+    if max_value < min_value:
+        raise ValueError(f"max_value must be >= min_value, got max={max_value}, min={min_value}")
+
+    original_target_sum = int(target_sum)
+    shifted_max_value = max_value - min_value
+    shifted_target_sum = original_target_sum - n_samples * min_value
+    if shifted_target_sum < 0 or shifted_target_sum > n_samples * shifted_max_value:
+        raise ValueError(
+            "Infeasible target_sum for the given min/max support: "
+            f"target_sum={original_target_sum}, n_samples={n_samples}, "
+            f"min_value={min_value}, max_value={max_value}"
+        )
+
+    target_sum = int(shifted_target_sum)
+    target_mean = shifted_target_sum / n_samples
     
-    target_sum = int(target_sum)
-    target_mean = target_sum / n_samples
-    
-    x_values = np.arange(0, max_value + 1)
+    x_values = np.arange(0, shifted_max_value + 1)
     
     def compute_objective(values):
         """
@@ -61,7 +79,7 @@ def maxent_optimize_discrete(target_sum, target_var, n_samples, max_value,
             (neg_entropy, penalty): objective components before temperature-aware blending
         """
         # Value counts and probabilities
-        value_counts = np.bincount(values, minlength=max_value + 1)
+        value_counts = np.bincount(values, minlength=shifted_max_value + 1)
         total_count = np.sum(value_counts)
         if total_count == 0:
             return 1e10, 1e10
@@ -140,7 +158,7 @@ def maxent_optimize_discrete(target_sum, target_var, n_samples, max_value,
         _ = temp_norm  # kept for API compatibility; fixed blend does not use temperature.
         penalty_norm = penalty_raw / (penalty_raw + penalty_ref + 1e-12)
 
-        support_size = max(max_value + 1, 2)
+        support_size = max(shifted_max_value + 1, 2)
         max_entropy = np.log(support_size)
         entropy = -neg_entropy
         entropy_norm = np.clip(entropy / (max_entropy + 1e-12), 0.0, 1.0)
@@ -150,6 +168,63 @@ def maxent_optimize_discrete(target_sum, target_var, n_samples, max_value,
 
         objective = (1.0 - entropy_weight) * penalty_norm + entropy_weight * entropy_cost
         return float(objective), float(penalty_norm), float(entropy_cost), float(entropy_weight)
+
+    def _sample_without_replacement(pool_indices, weights, k, rng):
+        """Sample indices without replacement using non-negative weights."""
+        pool_indices = np.asarray(pool_indices, dtype=int)
+        if pool_indices.size == 0 or k <= 0:
+            return np.array([], dtype=int)
+
+        k = min(int(k), int(pool_indices.size))
+        weights = np.asarray(weights, dtype=float)
+        weights = np.clip(weights, 0.0, None)
+        if weights.size != pool_indices.size or np.sum(weights) <= 1e-12:
+            return rng.choice(pool_indices, size=k, replace=False)
+
+        positive_mask = weights > 1e-12
+        positive_count = int(np.sum(positive_mask))
+        if positive_count <= 0:
+            return rng.choice(pool_indices, size=k, replace=False)
+
+        if positive_count < k:
+            pool_indices = pool_indices[positive_mask]
+            weights = weights[positive_mask]
+            k = positive_count
+
+        probs = weights / np.sum(weights)
+        return rng.choice(pool_indices, size=k, replace=False, p=probs)
+
+    def _random_allocate(amount, capacities, rng):
+        """Randomly allocate integer mass across slots without exceeding capacities."""
+        capacities = np.asarray(capacities, dtype=int)
+        allocation = np.zeros_like(capacities, dtype=int)
+        remaining = int(amount)
+
+        while remaining > 0:
+            room = capacities - allocation
+            active = np.where(room > 0)[0]
+            if active.size == 0:
+                break
+
+            weights = np.log(room[active] + 2.0).astype(float)
+            if np.sum(weights) <= 1e-12:
+                weights = np.ones(active.size, dtype=float)
+            probs = weights / np.sum(weights)
+
+            proposal = rng.multinomial(remaining, probs)
+            proposal = np.minimum(proposal, room[active])
+            assigned = int(np.sum(proposal))
+
+            if assigned <= 0:
+                chosen = int(rng.choice(active, p=probs))
+                proposal = np.zeros(active.size, dtype=int)
+                proposal[np.where(active == chosen)[0][0]] = 1
+                assigned = 1
+
+            allocation[active] += proposal
+            remaining -= assigned
+
+        return allocation, remaining
     
     # Initialize value sequence with uniform distribution
     # All samples start at mean value, then SA optimization adjusts for target moments
@@ -162,7 +237,7 @@ def maxent_optimize_discrete(target_sum, target_var, n_samples, max_value,
     
     if diff > 0:
         for _ in range(diff):
-            candidates = np.where(values < max_value)[0]
+            candidates = np.where(values < shifted_max_value)[0]
             if len(candidates) == 0:
                 break
             # Weight by log(value+2) for gentler spreading
@@ -198,19 +273,25 @@ def maxent_optimize_discrete(target_sum, target_var, n_samples, max_value,
     # Scale iterations with problem size: larger n_samples needs more moves
     # to spread all bins far enough from the initial uniform state.
     base_iterations = 1000
-    max_iterations = max(base_iterations, int(n_samples * np.log(n_samples)))
-    max_transfer = min(int(target_sum * 0.5), max_value)
+    max_iterations = max(base_iterations, int(n_samples * np.log(n_samples)) * 2)
+    max_transfer = min(int(target_sum * 0.5), shifted_max_value)
     initial_temp = 1.0
     # Final temp set so that at cooldown end, max_step = 1
     # max_step = final_temp * target_sum, so final_temp = 1 / target_sum
     final_temp = 0
-    no_improve_limit = 1000
+    no_improve_limit = 500
     no_improve_count = 0
-    penalty_threshold = 1e-8  # Early stop if penalty is negligible
-    good_enough_penalty = 1e-6
+    penalty_threshold = 1e-4  # Early stop if penalty is negligible
+    good_enough_penalty = 1e-4
+    worse_accept_prob = 0.10
+    worse_accept_scale = 0.02
+    concentration_limit_frac = 0.70
     
     if debug:
-        print(f"      [MaxEnt] Starting SA optimization: obj={current_obj:.4f}, penalty={current_penalty:.6f}")
+        print(
+            f"      [MaxEnt] Starting SA optimization: obj={current_obj:.4f}, "
+            f"penalty={current_penalty:.6f}, support=[{min_value}, {max_value}]"
+        )
     
     # Early stopping if already perfect
     if best_penalty < penalty_threshold:
@@ -219,8 +300,12 @@ def maxent_optimize_discrete(target_sum, target_var, n_samples, max_value,
         final_mean = np.mean(best_values)
         final_var = np.var(best_values, ddof=0)
         if debug:
-            print(f"      [MaxEnt] Final: mean={final_mean:.4f} (target={target_mean:.4f}), var={final_var:.4f} (target={target_var:.4f})")
-        return x_values, best_values.astype(int)
+            print(
+                f"      [MaxEnt] Final: mean={final_mean + min_value:.4f} "
+                f"(target={original_target_sum / n_samples:.4f}), "
+                f"var={final_var:.4f} (target={target_var:.4f})"
+            )
+        return np.arange(min_value, max_value + 1), (best_values + min_value).astype(int)
     
     # Per-200-iter diagnostic counters
     _block_accepted = 0
@@ -277,30 +362,28 @@ def maxent_optimize_discrete(target_sum, target_var, n_samples, max_value,
         one_weights = one_weights / np.sum(one_weights)
         one_idx = int(rng.choice(one_candidates, p=one_weights))
 
-        pool = np.concatenate([np.arange(0, one_idx), np.arange(one_idx + 1, n_samples)])
-        n_many = min(n_many, len(pool))
-        many_indices = rng.choice(pool, size=n_many, replace=False)
-
         # Linear cooling of transfer cap; moved amount is sampled log-wise later.
         temp_cap = 1 + int(round((max_transfer - 1) * temp_linear))
         temp_cap = max(1, min(temp_cap, max_transfer))
 
-        # Spread limit (-M): how much can leave "one" and fit into "many"
-        capacity_many_in = int(np.sum([max_value - values[i] for i in many_indices]))
-        M_neg = min(values[one_idx], temp_cap, capacity_many_in)
-
-        # Concentrate limit (+M): how much can leave "many" and fit into "one"
-        capacity_many_out = int(np.sum(values[many_indices]))
-        M_pos = min(capacity_many_out, temp_cap, max_value - values[one_idx])
-
-        if M_neg == 0 and M_pos == 0:
+        pool = np.concatenate([np.arange(0, one_idx), np.arange(one_idx + 1, n_samples)])
+        n_many = min(n_many, len(pool))
+        if n_many <= 0:
             continue
 
         new_values = values.copy()
         values_moved = 0
 
         if rng.random() < 0.50:
+            capacity_weights = (shifted_max_value - values[pool]).astype(float)
+            many_indices = _sample_without_replacement(pool, capacity_weights, n_many, rng)
+            if many_indices.size == 0:
+                continue
+
             # Spread: distribute amount from one → many
+            capacity_vec = (shifted_max_value - values[many_indices]).astype(int)
+            capacity_many_in = int(np.sum(capacity_vec))
+            M_neg = min(values[one_idx], temp_cap, capacity_many_in)
             if M_neg <= 0:
                 continue
             if M_neg > 1:
@@ -309,19 +392,29 @@ def maxent_optimize_discrete(target_sum, target_var, n_samples, max_value,
             else:
                 amount = 1
             new_values[one_idx] -= amount
-            remaining = amount
-            for idx in many_indices:
-                can = max_value - new_values[idx]
-                give = min(remaining, can)
-                new_values[idx] += give
-                remaining -= give
-                if remaining == 0:
-                    break
+            allocation, remaining = _random_allocate(amount, capacity_vec, rng)
+            new_values[many_indices] += allocation
             if remaining > 0:
                 new_values[one_idx] += remaining  # return what couldn't be placed
             values_moved = amount - remaining
         else:
+            donor_weights = values[pool].astype(float)
+            many_indices = _sample_without_replacement(pool, donor_weights, n_many, rng)
+            if many_indices.size == 0:
+                continue
+
             # Concentrate: gather amount from many → one
+            donor_capacity = values[many_indices].astype(int)
+            capacity_many_out = int(np.sum(donor_capacity))
+            receiver_room = int(shifted_max_value - values[one_idx])
+            available_concentration = min(capacity_many_out, receiver_room)
+            capped_concentration = 0
+            if available_concentration > 0:
+                capped_concentration = max(
+                    1,
+                    int(np.ceil(concentration_limit_frac * available_concentration)),
+                )
+            M_pos = min(capped_concentration, temp_cap)
             if M_pos <= 0:
                 continue
             if M_pos > 1:
@@ -329,13 +422,8 @@ def maxent_optimize_discrete(target_sum, target_var, n_samples, max_value,
                 amount = max(1, min(amount, M_pos))
             else:
                 amount = 1
-            remaining = amount
-            for idx in many_indices:
-                take = min(remaining, new_values[idx])
-                new_values[idx] -= take
-                remaining -= take
-                if remaining == 0:
-                    break
+            allocation, remaining = _random_allocate(amount, donor_capacity, rng)
+            new_values[many_indices] -= allocation
             values_moved = amount - remaining
             new_values[one_idx] += values_moved
         
@@ -369,13 +457,13 @@ def maxent_optimize_discrete(target_sum, target_var, n_samples, max_value,
             _block_improve_total += 1
             if accept:
                 _block_improve_accept += 1
-        elif t > 1e-12:
-            # For worsening moves, keep acceptance small (<=1%) and make it
-            # sharply sensitive to relative damage in normalized objective space.
+        else:
+            # Temperature-independent worsening acceptance with a fixed ceiling.
+            # Small degradations are accepted more often; larger degradations
+            # decay exponentially from the same 5% cap.
             damage_rel = delta_obj / (abs(current_obj) + 1e-12)
-            damage_scale = 0.003 + 0.02 * temp_norm
-            prob_worse = 0.002 * np.exp(-damage_rel / max(damage_scale, 1e-12))
-            prob_worse = float(np.clip(prob_worse, 0.0, 0.002))
+            prob_worse = worse_accept_prob * np.exp(-damage_rel / max(worse_accept_scale, 1e-12))
+            prob_worse = float(np.clip(prob_worse, 0.0, worse_accept_prob))
             accept = (rng.random() < prob_worse)
             _block_worse_total += 1
             if accept:
@@ -468,8 +556,12 @@ def maxent_optimize_discrete(target_sum, target_var, n_samples, max_value,
     final_var = np.var(best_values, ddof=0)
     
     if debug:
-        print(f"      [MaxEnt] Final: mean={final_mean:.4f} (target={target_mean:.4f}), var={final_var:.4f} (target={target_var:.4f})")
+        print(
+            f"      [MaxEnt] Final: mean={final_mean + min_value:.4f} "
+            f"(target={original_target_sum / n_samples:.4f}), "
+            f"var={final_var:.4f} (target={target_var:.4f})"
+        )
     
     # Return the actual sampled values (shape: n_samples)
     # NOT a histogram - each element is the count for that sample
-    return x_values, best_values.astype(int)
+    return np.arange(min_value, max_value + 1), (best_values + min_value).astype(int)
