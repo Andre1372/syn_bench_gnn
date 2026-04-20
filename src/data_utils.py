@@ -70,6 +70,69 @@ def get_split_indices(dataset: list[Data], seed: int | None = None) -> tuple[lis
     return train_idx, val_idx, test_idx
 
 
+def sample_dataset(dataset: list[Data], max_size: int, rng: np.random.Generator | None = None) -> list[Data]:
+    """Samples up to ``max_size`` graphs preserving label and size distributions.
+
+    If the dataset already has at most ``max_size`` graphs it is returned
+    unchanged.  Otherwise the sample is built via **stratified** selection:
+
+    1. The per-class quota is proportional to the original class frequencies.
+    2. Within each class, candidate graphs are ranked by ascending number of
+       nodes. Indices are chosen at uniformly-spaced positions along that
+       rank so that the sampled node-count histogram mirrors the full-class
+       histogram as closely as possible.
+
+    Args:
+        dataset: A list of PyG ``Data`` objects.
+        max_size: Maximum number of graphs to keep.
+        rng: NumPy random Generator used only to break rank ties deterministically.  If *None* a fresh generator is created.
+    Returns:
+        A (possibly shorted) list of ``Data`` objects.
+    """
+    if len(dataset) <= max_size: return dataset
+
+    if rng is None: rng = np.random.default_rng()
+
+    labels = np.array([int(d.y.item()) for d in dataset])
+    classes, counts = np.unique(labels, return_counts=True)
+    fractions = counts / counts.sum()
+
+    # Compute per-class quotas that sum to max_size
+    raw_quotas = fractions * max_size
+    quotas = np.floor(raw_quotas).astype(int)
+    remainder = max_size - quotas.sum()
+    # Distribute remaining slots to classes with largest fractional parts
+    fractional_parts = raw_quotas - quotas
+    top_classes = np.argsort(-fractional_parts)[:remainder]
+    quotas[top_classes] += 1
+
+    selected: list[int] = []
+    for cls, quota in zip(classes, quotas):
+        cls_indices = np.where(labels == cls)[0]
+        if quota >= len(cls_indices):
+            selected.extend(cls_indices.tolist())
+            continue
+
+        # Sort by num_nodes (add small random jitter to break ties)
+        node_counts = np.array([dataset[i].num_nodes for i in cls_indices], dtype=float)
+        jitter = rng.uniform(0, 1e-3, size=len(node_counts))
+        rank_order = np.argsort(node_counts + jitter)  # ascending node count
+
+        # Pick *quota* evenly-spaced positions along the sorted list
+        pick_positions = np.linspace(0, len(rank_order) - 1, quota, dtype=int)
+        picked = cls_indices[rank_order[pick_positions]]
+        selected.extend(picked.tolist())
+
+    final_fractions = quotas / quotas.sum()
+
+    selected.sort()
+    logger.info(
+        f"Dataset sampled from {len(dataset)} to {len(selected)} graphs "
+        f"{' '.join([f'class {c}: from {fractions[c]:.3f} to {final_fractions[c]:.3f}' for c in classes])}"
+    )
+    return [dataset[i] for i in selected]
+
+
 def make_loaders(dataset: list[Data], split_indices: tuple[list[int], list[int], list[int]], batch_size: int = 32) -> tuple[DataLoader, DataLoader, DataLoader]:
     """Splits a dataset into train/val/test loaders based on provided indices.
 
@@ -141,14 +204,19 @@ def get_target_stats(dataset_obj: DatasetPT, idx: int) -> dict[str, Any]:
     raise ValueError(f"No metadata found for graph {idx}.")
 
 
-def preprocess_and_save_original_dataset(dataset_name: str, data_dir: Path) -> tuple[list[Data], dict[str, Any]]:
+def preprocess_and_save_original_dataset(dataset_name: str, data_dir: Path, max_size: int | None = None, rng: np.random.Generator | None = None,) -> tuple[list[Data], dict[str, Any]]:
     """Preprocesses a TUDataset, removes features, computes statistics, and saves to .pt.
+
+    If ``max_size`` is set and the dataset is larger, it is down-sampled
+    **before** statistics are computed and the file is written.
     
     Args:
         dataset_name: Name of the TUDataset.
         data_dir: Directory where the original dataset will be downloaded and saved.
+        max_size: If not None, down-sample to at most this many graphs while preserving label and node/edge-count distributions.
+        rng: NumPy Generator forwarded to :func:`sample_dataset`.  If *None* a fresh generator is used when sampling is needed.
     Returns:
-        The preprocessed list of Data objects and the metadata dictionary.
+        The preprocessed (and possibly sampled) list of Data objects and the metadata dictionary.
     """
     orig_pt_path = data_dir / dataset_name / f"{dataset_name}_original.pt"
     
@@ -158,6 +226,10 @@ def preprocess_and_save_original_dataset(dataset_name: str, data_dir: Path) -> t
 
     # Remove node features completely for topology-only learning
     original_data_list = [remove_features(d) for d in raw_dataset]
+
+    # Down-sample before saving so generate_synthetic_variants reads a cut file
+    if max_size is not None and len(original_data_list) > max_size:
+        original_data_list = sample_dataset(original_data_list, max_size, rng)
 
     from src.graph_analysis import per_graph_statistics, aggregate_statistics_per_class
     orig_stats = per_graph_statistics(original_data_list, show_progress=True)

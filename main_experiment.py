@@ -32,8 +32,19 @@ def parse_arguments() -> argparse.Namespace:
         "--dataset",
         type=str,
         nargs="+",
-        required=True,
-        help="One or more TUDataset names to use as baseline (e.g. PROTEINS MUTAG).",
+        default=["all"],
+        help="One or more TUDataset names to use as baseline (e.g. PROTEINS MUTAG). Use 'all' (default) to process all datasets in the data/ folder.",
+    )
+    parser.add_argument(
+        "--cut_datasets",
+        type=int,
+        default=None,
+        metavar="N",
+        help=(
+            "If set, each dataset is down-sampled to at most N graphs before "
+            "generation and evaluation.  Sampling is stratified by label and "
+            "preserves the node/edge-count distribution within each class."
+        ),
     )
     parser.add_argument(
         "--methods",
@@ -128,6 +139,16 @@ def main() -> None:
     args = parse_arguments()
 
     project_root = Path(".")
+    
+    # Handle "all" dataset selection
+    if "all" in args.dataset:
+        data_dir = project_root / "data"
+        if data_dir.exists():
+            args.dataset = [d.name for d in data_dir.iterdir() if d.is_dir()]
+            args.dataset.sort()
+        else:
+            raise ValueError("No valid TUDatasets found in 'data/' directory.")
+
     n_datasets = len(args.dataset)
     n_methods = len(args.methods)
     session_tag = (
@@ -137,7 +158,7 @@ def main() -> None:
     )
     setup_console_logging(project_root, session_tag)
     logger = logging.getLogger(__name__)
-
+    
     # Reproducibility
     rng = (
         np.random.default_rng()
@@ -152,8 +173,8 @@ def main() -> None:
         logger.info("=" * 60)
 
         for dataset_name in args.dataset:
-            # Preprocess and save, guaranteeing topology stripping
-            preprocess_and_save_original_dataset(dataset_name, project_root / "data")
+            # Preprocess and save (with optional down-sampling) before generation.
+            preprocess_and_save_original_dataset(dataset_name, project_root / "data", max_size=args.cut_datasets, rng=rng)
 
             for method in args.methods:
                 logger.info(f"--- Generating: dataset={dataset_name}  method={method} ---")
@@ -202,11 +223,13 @@ def main() -> None:
 
         orig_pt_path = project_root / "data" / dataset_name / f"{dataset_name}_original.pt"
         if not orig_pt_path.exists():
-            preprocess_and_save_original_dataset(dataset_name, project_root / "data")
+            preprocess_and_save_original_dataset(dataset_name, project_root / "data", max_size=args.cut_datasets, rng=rng)
 
         orig_dataset_obj = DatasetPT(orig_pt_path)
+        # The .pt already contains the (possibly cut) dataset — no extra sampling needed.
         original_data_list = [orig_dataset_obj[i] for i in range(len(orig_dataset_obj))]
-        
+
+
         gnn_config = {
             **gnn_config_base,
             "num_classes": orig_dataset_obj.metadata.get("num_classes"),
