@@ -11,7 +11,8 @@ from sklearn.metrics import accuracy_score, f1_score, roc_auc_score
 from torch import nn, optim
 from torch_geometric.data import Data
 from torch_geometric.loader import DataLoader
-from torch_geometric.nn import GCNConv, GINConv, Sequential, global_mean_pool, global_max_pool
+from torch_geometric.nn import global_mean_pool, global_max_pool
+from torch_geometric.nn.models import GCN, GIN
 
 from src.data_utils import make_loaders, DatasetPT, remove_features
 from src.graph_analysis import per_graph_statistics, aggregate_statistics_per_class
@@ -35,14 +36,15 @@ class GCNGraphClassifier(nn.Module):
         super().__init__()
 
         # Define GCN layers in a PyG Sequential container
-        layers = []
-        for i in range(num_layers):
-            dim_in = in_dim if i == 0 else hidden_dim
-            layers.append((GCNConv(dim_in, hidden_dim), 'x, edge_index -> x'))
-            layers.append(nn.BatchNorm1d(hidden_dim))
-            layers.append(nn.ReLU(inplace=True))
-
-        self.gnn = Sequential('x, edge_index', layers)
+        self.gnn = GCN(
+            in_channels=in_dim,
+            hidden_channels=hidden_dim,
+            num_layers=num_layers,
+            out_channels=hidden_dim,
+            dropout=dropout,
+            act='relu',
+            norm='batch'
+        )
 
         # Final classification head
         self.head = nn.Sequential(
@@ -74,20 +76,15 @@ class GINGraphClassifier(nn.Module):
         """
         super().__init__()
 
-        layers = []
-        for i in range(num_layers):
-            dim_in = in_dim if i == 0 else hidden_dim
-            # GIN using an internal MLP
-            mlp = nn.Sequential(
-                nn.Linear(dim_in, hidden_dim),
-                nn.ReLU(inplace=True),
-                nn.Linear(hidden_dim, hidden_dim)
-            )
-            layers.append((GINConv(mlp), 'x, edge_index -> x'))
-            layers.append(nn.BatchNorm1d(hidden_dim))
-            layers.append(nn.ReLU(inplace=True))
-
-        self.gnn = Sequential('x, edge_index', layers)
+        self.gnn = GIN(
+            in_channels=in_dim,
+            hidden_channels=hidden_dim,
+            num_layers=num_layers,
+            out_channels=hidden_dim,
+            dropout=dropout,
+            act='relu',
+            norm='batch'
+        )
 
         # Final classification head
         self.head = nn.Sequential(
