@@ -17,6 +17,11 @@ from src.data_utils import load_all_synthetic_variants, get_split_indices, prepr
 from src.generate_datasets import generate_synthetic_variants, KNOWN_METHODS
 from src.train_gnn import evaluate_dataset
 
+ALL_DATASETS = [
+        "AIDS", "BZR", "BZR_MD", "COX2", "COX2_MD", "DD", "DHFR", "DHFR_MD", "ER_MD", "IMDB-BINARY", 
+        "MUTAG", "PROTEINS", "PTC_FM", "PTC_FR", "PTC_MM", "PTC_MR", "REDDIT-BINARY", "SYNTHETIC"
+    ]
+
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
@@ -142,12 +147,7 @@ def main() -> None:
     
     # Handle "all" dataset selection
     if "all" in args.dataset:
-        data_dir = project_root / "data"
-        if data_dir.exists():
-            args.dataset = [d.name for d in data_dir.iterdir() if d.is_dir()]
-            args.dataset.sort()
-        else:
-            raise ValueError("No valid TUDatasets found in 'data/' directory.")
+        args.dataset = ALL_DATASETS
 
     n_datasets = len(args.dataset)
     n_methods = len(args.methods)

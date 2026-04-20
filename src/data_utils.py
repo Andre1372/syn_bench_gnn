@@ -155,8 +155,6 @@ def make_loaders(dataset: list[Data], split_indices: tuple[list[int], list[int],
     val_loader = DataLoader(val_set, batch_size=batch_size, shuffle=False)
     test_loader = DataLoader(test_set, batch_size=batch_size, shuffle=False)
 
-    logger.info(f"Splits — train: {len(train_set)}, val: {len(val_set)}, test: {len(test_set)} graphs.")
-
     return train_loader, val_loader, test_loader
 
 
