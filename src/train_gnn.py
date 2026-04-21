@@ -41,7 +41,7 @@ class GCNGraphClassifier(nn.Module):
             hidden_channels=hidden_dim,
             num_layers=num_layers,
             out_channels=hidden_dim,
-            dropout=dropout,
+            dropout=0.0,
             act='relu',
             norm='batch'
         )
@@ -81,7 +81,7 @@ class GINGraphClassifier(nn.Module):
             hidden_channels=hidden_dim,
             num_layers=num_layers,
             out_channels=hidden_dim,
-            dropout=dropout,
+            dropout=0.0,
             act='relu',
             norm='batch'
         )
@@ -254,11 +254,13 @@ def run_single_experiment(model: nn.Module, dataset: list[Data], run_id: int, de
     criterion = nn.CrossEntropyLoss()
 
     best_val_f1 = -1.0
+    val_f1_history = []
     best_model_state: dict[str, torch.Tensor] | None = None
 
     for epoch in range(epochs):
         train_loss = train_epoch(model, train_loader, optimizer, criterion, device)
         _, _, val_f1, _ = eval_epoch(model, val_loader, criterion, device)
+        val_f1_history.append(val_f1)
 
         if val_f1 > best_val_f1:
             best_val_f1 = val_f1
@@ -286,6 +288,7 @@ def run_single_experiment(model: nn.Module, dataset: list[Data], run_id: int, de
         "test_f1": test_f1,
         "test_acc": test_acc,
         "test_roc_auc": test_roc_auc,
+        "val_f1_history": val_f1_history,
     }
 
 

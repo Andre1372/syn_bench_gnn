@@ -18,8 +18,9 @@ from src.generate_datasets import generate_synthetic_variants, KNOWN_METHODS
 from src.train_gnn import evaluate_dataset
 
 ALL_DATASETS = [
-        "AIDS", "BZR", "BZR_MD", "COX2", "COX2_MD", "DD", "DHFR", "DHFR_MD", "ER_MD", "IMDB-BINARY", 
-        "MUTAG", "PROTEINS", "PTC_FM", "PTC_FR", "PTC_MM", "PTC_MR", "REDDIT-BINARY", "SYNTHETIC"
+        "AIDS", "BZR", "COX2", "DHFR", "FRANKENSTEIN", "Mutagenicity", "MUTAG", "NCI1", "NCI109",
+        "PTC_FM", "PTC_FR", "PTC_MM", "PTC_MR", "DD", "KKI", "OHSU", "Peking_1", "PROTEINS", 
+        "IMDB-BINARY"
     ]
 
 # ---------------------------------------------------------------------------
@@ -89,7 +90,7 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument(
         "--batch_size",
         type=int,
-        default=32,
+        default=16,
         help="Batch size for GNN training and evaluation.",
     )
 

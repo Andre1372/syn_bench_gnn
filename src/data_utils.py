@@ -229,6 +229,39 @@ def preprocess_and_save_original_dataset(dataset_name: str, data_dir: Path, max_
     if max_size is not None and len(original_data_list) > max_size:
         original_data_list = sample_dataset(original_data_list, max_size, rng)
 
+    # Binarize labels if multi-class using optimal partitioning for balance
+    if num_classes > 2:
+        all_y = torch.cat([d.y for d in original_data_list if d.y is not None]).view(-1)
+        unique_labels, counts = torch.unique(all_y, return_counts=True)
+        counts_list = counts.tolist()
+        labels_list = unique_labels.tolist()
+        
+        total_samples = sum(counts_list)
+        target = total_samples // 2
+        
+        # DP to find subset sum closest to target
+        reachable = {0: []}
+        for i, count in enumerate(counts_list):
+            new_reachable = {}
+            for s, indices in reachable.items():
+                new_s = s + count
+                if new_s not in reachable:
+                    new_reachable[new_s] = indices + [i]
+            reachable.update(new_reachable)
+            
+        best_sum = min(reachable.keys(), key=lambda s: abs(s - target))
+        class1_labels = {labels_list[i] for i in reachable[best_sum]}
+
+        logger.info(
+            f"Binarizing {dataset_name} ({num_classes} classes). "
+            f"Set 1 labels: {sorted(list(class1_labels))} (size {best_sum}), "
+            f"Set 0 labels: {sorted(list(set(labels_list) - class1_labels))} (size {total_samples - best_sum})."
+        )
+        for d in original_data_list:
+            if d.y is not None:
+                d.y = torch.tensor([1 if d.y.item() in class1_labels else 0], dtype=torch.long)
+        num_classes = 2
+
     from src.graph_analysis import per_graph_statistics, aggregate_statistics_per_class
     orig_stats = per_graph_statistics(original_data_list, show_progress=True)
     orig_agg_class = aggregate_statistics_per_class(original_data_list, orig_stats)

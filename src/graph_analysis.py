@@ -104,8 +104,8 @@ def analyze_single_graph(graph: ig.Graph) -> dict[str, float]:
     for i, val in enumerate(deg_moments):
         stats_dict[f"deg_moment_{i+1}"] = float(val)
 
-    for i, val in enumerate(motifs):
-        stats_dict[f"motif_count_{i+1}"] = float(val)
+    # for i, val in enumerate(motifs):
+    #     stats_dict[f"motif_count_{i+1}"] = float(val)
 
     return stats_dict
 
