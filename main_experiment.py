@@ -18,9 +18,7 @@ from src.generate_datasets import generate_synthetic_variants, KNOWN_METHODS
 from src.train_gnn import evaluate_dataset
 
 ALL_DATASETS = [
-        "AIDS", "BZR", "COX2", "DHFR", "FRANKENSTEIN", "Mutagenicity", "MUTAG", "NCI1", "NCI109",
-        "PTC_FM", "PTC_FR", "PTC_MM", "PTC_MR", "DD", "KKI", "OHSU", "Peking_1", "PROTEINS", 
-        "IMDB-BINARY"
+        "BZR", "DHFR", "Mutagenicity", "MUTAG"
     ]
 
 # ---------------------------------------------------------------------------

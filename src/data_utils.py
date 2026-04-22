@@ -194,10 +194,8 @@ def get_target_stats(dataset_obj: DatasetPT, idx: int) -> dict[str, Any]:
         return {
             "n_nodes": int(pgs.get("n_nodes")),
             "n_edges": int(pgs.get("n_edges")),
-            "normalized_degree_moments": [
-                pgs.get("deg_moment_1"), pgs.get("deg_moment_2"),
-                pgs.get("deg_moment_3"), pgs.get("deg_moment_4")
-            ]
+            "normalized_degree_moments": pgs.get("normalized_degree_moments"),
+            "annd": pgs.get("annd"),
         }
     raise ValueError(f"No metadata found for graph {idx}.")
 
