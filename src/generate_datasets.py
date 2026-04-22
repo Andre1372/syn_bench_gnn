@@ -22,7 +22,7 @@ from src.ergm.graph_generator import ergm_fit_sample
 logger = logging.getLogger(__name__)
 
 
-KNOWN_METHODS: frozenset[str] = frozenset({"padma", "pdd", "ergm", "dummyEdges"})
+KNOWN_METHODS: frozenset[str] = frozenset({"padma", "pdd", "ergm", "dummyEdges", "dummyNodes"})
 
 
 def generate_graph(target_stats: dict[str, Any], method: str, rng: np.random.Generator) -> nx.Graph:
@@ -130,6 +130,14 @@ def generate_graph(target_stats: dict[str, Any], method: str, rng: np.random.Gen
             raise RuntimeError("ERGM failed to generate any synthetic samples.")
             
         return igraph_to_networkx(synth_igraphs[0])
+    elif method == "dummyNodes":
+        # A graph with the same number of nodes as the observed graph, with random number of edges.
+        n_nodes = target_stats["n_nodes"]
+        n_edges = target_stats["n_edges"]
+        p = n_edges / (n_nodes * (n_nodes - 1) / 2) + rng.uniform(-0.05, 0.05)
+        p = max(0, min(1, p))
+        G_nx = nx.erdos_renyi_graph(n=n_nodes, p=p, seed=int(rng.integers(0, 2**31)))
+        return G_nx
     elif method == "dummyEdges":
         # A graph with the same number of nodes and edges as the observed graph.
         n_nodes = target_stats["n_nodes"]

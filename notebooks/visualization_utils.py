@@ -8,6 +8,68 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import seaborn as sns
+import networkx as nx
+
+
+def plot_graph(
+    graph: nx.Graph, 
+    ax: plt.Axes, 
+    dataset_name: str,
+    graph_index: int,
+    fixed_pos: dict[int, tuple[float, float]] | None = None
+) -> None:
+    """Visualizes a single graph on a given Axes with its motif counts.
+
+    Args:
+        graph: The networkx graph to render.
+        ax: The matplotlib Axes to draw onto.
+        dataset_name: Name of the dataset for the title.
+        graph_index: Index of the graph for the title.
+        fixed_pos: Optional dictionary of node positions for consistent layout.
+    """
+    num_nodes: int = graph.number_of_nodes()
+    num_edges: int = graph.number_of_edges()
+
+    # Use the fixed positions from the original graph for consistency
+    pos = fixed_pos if fixed_pos is not None else nx.spring_layout(graph, seed=42)
+
+    nx.draw(graph, pos, ax=ax, node_size=30, node_color="skyblue", edge_color='gray', with_labels=False)
+    ax.set_title(
+        f"Dataset: {dataset_name}  |  Index: {graph_index}\n"
+        f"Nodes: {num_nodes}   Edges: {num_edges}",
+        fontsize=10,
+        pad=12,
+    )
+    ax.axis("off")
+
+
+def plot_annd(graph: nx.Graph, ax: plt.Axes, title: str = "Average Nearest Neighbor Degree", label: str = 'Empirical $k_{nn}(k)$') -> None:
+    """Visualizes the average nearest neighbor degree for a given graph.
+
+    Args:
+        graph: The networkx graph to analyze.
+        ax: The matplotlib Axes to draw onto.
+        title: Title for the plot.
+        label: Label for the legend.
+    """
+    annd_dict = nx.average_degree_connectivity(graph)
+    if not annd_dict:
+        return
+    
+    degrees = sorted(annd_dict.keys())
+    values = [annd_dict[d] for d in degrees]
+
+    ax.scatter(degrees, values, color='#2c3e50', s=100, alpha=0.8, edgecolors='white', linewidth=1.5, label=label)
+    ax.plot(degrees, values, color='#3498db', linestyle='-', linewidth=2, alpha=0.5)
+
+    ax.set_xlabel("Degree $k$", fontsize=12, fontweight='bold')
+    ax.set_ylabel("Avg. Neighbor Degree $k_{nn}(k)$", fontsize=12, fontweight='bold')
+    ax.set_title(title, fontsize=14, pad=15)
+    ax.grid(True, linestyle="--", alpha=0.3)
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    if label:
+        ax.legend(frameon=True, facecolor='white', framealpha=0.9)
 
 
 def add_baseline_guide(
@@ -77,7 +139,7 @@ def plot_performance_distribution(
     # Disable dodging if every X position has only 1 hue value
     do_dodge = False
     if hue:
-        hues_per_x = df.groupby(x, sort=False)[hue].nunique()
+        hues_per_x = df.groupby(x, sort=False, observed=True)[hue].nunique()
         if hues_per_x.max() > 1:
             do_dodge = True
 

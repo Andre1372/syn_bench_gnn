@@ -13,6 +13,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from IPython.display import display
+import seaborn as sns
 
 # Ensure project root is in path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent if "__file__" in globals() else Path(".").resolve().parent
@@ -24,15 +25,17 @@ from notebooks.visualization_utils import add_baseline_guide, plot_performance_d
 
 # Cell 1 - Global Variables & Data Loading
 RESULTS_DIR = PROJECT_ROOT / "results"
-DATASET_NAMES = ["DHFR", "MUTAG", "PROTEINS", "IMDB-BINARY", "DD"]
-BASE_METHOD_ORDER = ["padma", "pdd", "ergm", "dummyEdges"]
+DATASET_NAMES = [
+        "BZR", "DHFR", "Mutagenicity", "MUTAG",
+    ]
+BASE_METHOD_ORDER = ["dummyNodes", "dummyEdges", "padma", "pdd", "ergm"]
 PALETTE = {
     "original": "#5B9BD5", 
     "padma": "#F5C431", 
     "pdd": "#E06C75",
     "ergm": "#5CE9FF", 
     "dummyEdges": "#98C379", 
-    "nextgen": "#DA7CF7"}
+    "dummyNodes": "#DA7CF7"}
 
 def load_experiment_data() -> Tuple[pd.DataFrame, pd.DataFrame]:
     """Loads and preprocesses main GNN evaluation data and per-graph statistics."""
@@ -154,7 +157,7 @@ def plot_performance_trajectory(df: pd.DataFrame, df_pg: pd.DataFrame, dataset: 
         
         # Apply normalization with safety clipping
         denom = max_val - min_val
-        df_agg_raw[f"scaled_{m}"] = ((df_agg_raw[m] - min_val) / denom if denom > 1e-9 else 0.0).clip(0.0, 1.0)
+        df_agg_raw[f"scaled_{m}"] = ((df_agg_raw[m] - min_val) / denom if denom > 1e-9 else 0.0)
 
     df_agg_pg = df_agg_raw.set_index(["source_base", "source", "label"])
 
@@ -362,7 +365,7 @@ def display_detailed_statistics_table(df_pg: pd.DataFrame, dataset: str, analyze
     display(_styler(df_final.style))
 
 for ds in DATASETS:
-    plot_performance_trajectory(df_raw, df_pg_raw, ds, qq_metric="modularity", variants_idx=[1, 2, 3, 4, 5], analyze_motifs=True)
+    plot_performance_trajectory(df_raw, df_pg_raw, ds, qq_metric="assortativity", variants_idx=[1, 2, 3, 4, 5], analyze_motifs=False)
     # display_detailed_statistics_table(df_pg_raw, ds, analyze_motifs=True)
 
 
@@ -442,8 +445,8 @@ def plot_performance_overview(df: pd.DataFrame, df_synth: pd.DataFrame, analyze_
     plt.subplots_adjust(wspace=0.1)
     plt.show()
 
-def display_aggregated_summary(df: pd.DataFrame, df_synth: pd.DataFrame, df_pg: pd.DataFrame, analyze_motifs: bool = True) -> None:
-    if df_pg.empty: return
+def _compute_aggregated_summary_df(df: pd.DataFrame, df_synth: pd.DataFrame, df_pg: pd.DataFrame, analyze_motifs: bool = True) -> pd.DataFrame:
+    if df_pg.empty: return pd.DataFrame()
 
     f1_agg = df.groupby(["dataset", "source_base", "model"], observed=True)["test_f1"].agg(["mean", "std"])
     delta_agg = df_synth.groupby(["dataset", "source_base", "model"], observed=True)["delta_test_f1"].agg(["mean", "std"])
@@ -454,7 +457,7 @@ def display_aggregated_summary(df: pd.DataFrame, df_synth: pd.DataFrame, df_pg: 
     all_topo = topo_base + moment_metrics + motif_metrics
     topo_agg = df_pg.groupby(["dataset", "source_base"], observed=True)[all_topo].agg(["mean", "std"])
     
-    all_methods = ["original"] + [m for m in df["source_base"].unique() if m != "original"]
+    all_methods = df["source_base"].cat.categories.tolist()
     
     c_tuples = []
     for model in MODELS: c_tuples.append(("F1-Score", model))
@@ -488,9 +491,14 @@ def display_aggregated_summary(df: pd.DataFrame, df_synth: pd.DataFrame, df_pg: 
                 except KeyError: row.append("N/A")
             rows.append(row)
 
-    df_res = pd.DataFrame(rows, index=pd.MultiIndex.from_tuples(r_tuples, names=["Dataset", "Method"]), columns=pd.MultiIndex.from_tuples(c_tuples, names=["Category", "Metric"]))
+    return pd.DataFrame(rows, index=pd.MultiIndex.from_tuples(r_tuples, names=["Dataset", "Method"]), columns=pd.MultiIndex.from_tuples(c_tuples, names=["Category", "Metric"]))
+
+def display_aggregated_summary(df: pd.DataFrame, df_synth: pd.DataFrame, df_pg: pd.DataFrame, analyze_motifs: bool = True) -> None:
+    df_res = _compute_aggregated_summary_df(df, df_synth, df_pg, analyze_motifs)
+    if df_res.empty: return
 
     def _styler(styler):
+        c_tuples = df_res.columns.tolist()
         categories = [c[0] for c in c_tuples]
         for i in range(1, len(categories)):
             if categories[i] != categories[i-1]:
@@ -510,3 +518,88 @@ def display_aggregated_summary(df: pd.DataFrame, df_synth: pd.DataFrame, df_pg: 
 
 plot_performance_overview(df_raw, df_synth, analyze_motifs=True)
 display_aggregated_summary(df_raw, df_synth, df_pg_raw, analyze_motifs=True)
+
+
+
+# Cell 4 - Final aggregated results
+def plot_final_results_comparison(df_synth: pd.DataFrame, df_pg: pd.DataFrame, analyze_metric: str = "modularity") -> None:
+    """
+    Plots a dual-panel summary:
+    1. Left: Aggregated mean Absolute F1-Delta (|ΔF1|) across datasets.
+    2. Right: Mean Absolute Error (MAE) for a selected topological metric relative to original baselines.
+    """
+    if df_synth.empty or df_pg.empty:
+        print("Required data is missing for aggregated plots.")
+        return
+
+    # 1. Data Preparation
+    # Performance data
+    df_perf = df_synth[df_synth["source_base"] != "original"].copy()
+    df_perf["source_base"] = df_perf["source_base"].cat.remove_unused_categories()
+    
+    # Topological data error calculation
+    df_topo = df_pg[df_pg["source_base"] != "original"].copy()
+    df_topo["source_base"] = df_topo["source_base"].cat.remove_unused_categories()
+    
+    # Calculate baseline per dataset for the selected metric
+    baselines = df_pg[df_pg["source"] == "original"].groupby("dataset")[analyze_metric].mean()
+    
+    # Compute Absolute Error for each synthetic graph compared to its specific dataset baseline
+    df_topo[f"abs_err_{analyze_metric}"] = df_topo.apply(
+        lambda row: abs(row[analyze_metric] - baselines.get(row["dataset"], row[analyze_metric])), axis=1
+    )
+
+    # 2. Plotting
+    fig, axes = plt.subplots(1, 2, figsize=(18, 6))
+    metric_label = analyze_metric.replace("_", " ").capitalize()
+    fig.suptitle(f"Global Summary: Performance Gap vs structural Error ({metric_label})", fontsize=16, fontweight="bold", y=1.05)
+
+    # --- Left: Performance Gap (|ΔF1|) ---
+    sns.lineplot(
+        data=df_perf, 
+        x="source_base", 
+        y="delta_test_f1", 
+        hue="model", 
+        marker="o", 
+        markersize=8, 
+        linewidth=2.5,
+        ax=axes[0],
+        # errorbar=("ci", 95)
+        errorbar=None
+    )
+    axes[0].set_title("Aggregated GNN Performance Gap (|ΔF1|)", fontsize=13, fontweight="bold")
+    axes[0].set_xlabel("Method", fontsize=11, fontweight="bold")
+    axes[0].set_ylabel("Mean |ΔF1| (across all datasets)", fontsize=11, fontweight="bold")
+    axes[0].grid(axis='y', linestyle='--', alpha=0.4)
+    axes[0].legend(title="GNN Model", frameon=True, shadow=True)
+
+    # --- Right: Topological Metric Error Trend ---
+    sns.lineplot(
+        data=df_topo, 
+        x="source_base", 
+        y=f"abs_err_{analyze_metric}", 
+        marker="s", 
+        markersize=8, 
+        linewidth=2.5, 
+        color="#D62728", # Distinctive red for structure error
+        ax=axes[1],
+        # errorbar=("ci", 95)
+        errorbar=None
+    )
+    
+    axes[1].axhline(0, color="black", linestyle="-", linewidth=1.2, alpha=0.5) # Reference for zero error
+    axes[1].set_title(f"Structural Error: |Δ {metric_label}|", fontsize=13, fontweight="bold")
+    axes[1].set_xlabel("Method", fontsize=11, fontweight="bold")
+    axes[1].set_ylabel(f"Mean Abs Error in {metric_label}", fontsize=11, fontweight="bold")
+    axes[1].grid(axis='y', linestyle='--', alpha=0.4)
+
+    # Common formatting
+    for ax in axes:
+        methods = [m.upper() for m in df_perf["source_base"].cat.categories]
+        ax.set_xticks(ticks=range(len(methods)), labels=methods)
+
+    plt.tight_layout()
+    plt.show()
+
+# Run final summary analysis
+plot_final_results_comparison(df_synth, df_pg_raw, analyze_metric="assortativity")
