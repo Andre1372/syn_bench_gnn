@@ -20,7 +20,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.data_utils import pytorch_to_networkx, networkx_to_igraph
-from src.graph_analysis import count_deg_moments
+from src.graph_analysis import count_deg_moments, calculate_annd, calculate_annd_error
 from src.generate_datasets import generate_graph
 from notebooks.visualization_utils import plot_graph, plot_annd
 
@@ -48,6 +48,7 @@ print(f"Original Graph Assortativity: {assortativity:.4f}")
 plt.tight_layout()
 plt.show()
 
+
 # Cell 3 - Synthetic Graph Generation (PADMA)
 # Prepare target statistics
 ig_graph = networkx_to_igraph(GRAPH)
@@ -73,3 +74,34 @@ print(f"Synthetic Graph Assortativity: {assortativity_synth:.4f}")
 
 plt.tight_layout()
 plt.show()
+
+
+
+# Cell 4 - Structural Error Analysis
+print("\n" + "="*30)
+print("STRUCTURAL ERROR ANALYSIS")
+print("="*30)
+
+# Convert to igraph for detailed topological analysis
+ig_original = networkx_to_igraph(GRAPH)
+ig_synthetic = networkx_to_igraph(GRAPH_SYNTH)
+
+# Calculate ANND and degree sequences for both graphs
+annd_original = calculate_annd(ig_original)
+deg_seq_original = np.array(ig_original.degree())
+
+annd_synthetic = calculate_annd(ig_synthetic)
+deg_seq_synthetic = np.array(ig_synthetic.degree())
+
+# Compute the structural error between the ANND of the synthetic and original graphs
+annd_error = calculate_annd_error(
+    obtained_annd=annd_synthetic, 
+    obtained_degree_sequence=deg_seq_synthetic, 
+    target_annd=annd_original, 
+    target_degree_sequence=deg_seq_original
+)
+
+print(f"ANND Structural Error (PADMA vs Original): {annd_error:.4f}")
+print(f"Original Assortativity:  {assortativity:.4f}")
+print(f"Synthetic Assortativity: {assortativity_synth:.4f}")
+print("="*30)

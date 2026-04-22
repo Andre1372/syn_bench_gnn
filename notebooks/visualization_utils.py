@@ -10,6 +10,9 @@ import pandas as pd
 import seaborn as sns
 import networkx as nx
 
+from src.data_utils import networkx_to_igraph
+from src.graph_analysis import calculate_annd
+
 
 def plot_graph(
     graph: nx.Graph, 
@@ -52,12 +55,24 @@ def plot_annd(graph: nx.Graph, ax: plt.Axes, title: str = "Average Nearest Neigh
         title: Title for the plot.
         label: Label for the legend.
     """
-    annd_dict = nx.average_degree_connectivity(graph)
-    if not annd_dict:
+    # Convert to igraph to use the shared analysis logic
+    ig_graph = networkx_to_igraph(graph)
+    annd_values = calculate_annd(ig_graph)
+    
+    if len(annd_values) == 0:
         return
     
-    degrees = sorted(annd_dict.keys())
-    values = [annd_dict[d] for d in degrees]
+    # calculate_annd returns an array where index k corresponds to degree k+1
+    degrees = np.arange(1, len(annd_values) + 1)
+    values = annd_values
+    
+    # Filter out entries where ANND is 0 (meaning degree not present or no neighbors)
+    mask = values > 0
+    degrees = degrees[mask]
+    values = values[mask]
+
+    if len(degrees) == 0:
+        return
 
     ax.scatter(degrees, values, color='#2c3e50', s=100, alpha=0.8, edgecolors='white', linewidth=1.5, label=label)
     ax.plot(degrees, values, color='#3498db', linestyle='-', linewidth=2, alpha=0.5)

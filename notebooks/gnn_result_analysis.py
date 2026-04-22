@@ -12,6 +12,7 @@ import matplotlib.patches as mpatches
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+import torch
 from IPython.display import display
 import seaborn as sns
 
@@ -21,6 +22,45 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from notebooks.visualization_utils import add_baseline_guide, plot_performance_distribution
+from src.data_utils import DatasetPT
+from src.graph_analysis import calculate_moments_error, calculate_annd_error
+
+# --- Shared Caching Utilities ---
+_DEGREE_CACHE = {}
+
+def get_degree_sequence(dataset_path: str | Path, idx: int) -> np.ndarray | None:
+    """Retrieves the degree sequence for a specific graph in a PyG dataset.
+    
+    Results are cached per dataset_path to avoid redundant torch.load calls.
+    """
+    path = Path(dataset_path)
+    if path not in _DEGREE_CACHE:
+        if not path.exists():
+            _DEGREE_CACHE[path] = None
+        else:
+            try:
+                # Use the robust DatasetPT loader to handle collated PyG datasets
+                dataset = DatasetPT(path)
+                seqs = []
+                for i in range(len(dataset)):
+                    data = dataset[i]
+                    row = data.edge_index[0]
+                    # num_nodes is reliably inferred by DatasetPT/Batch
+                    n = data.num_nodes
+                    deg = np.zeros(n, dtype=int)
+                    if row.numel() > 0:
+                        np.add.at(deg, row.numpy(), 1)
+                    seqs.append(deg)
+                _DEGREE_CACHE[path] = seqs
+            except Exception as e:
+                print(f"Error loading {path}: {e}")
+                _DEGREE_CACHE[path] = None
+                
+    ds_seqs = _DEGREE_CACHE[path]
+    if ds_seqs and 0 <= idx < len(ds_seqs):
+        return ds_seqs[idx]
+    return None
+
 
 
 # Cell 1 - Global Variables & Data Loading
@@ -84,6 +124,9 @@ def load_experiment_data() -> Tuple[pd.DataFrame, pd.DataFrame]:
                 # Unpack into individual deg_moment_X columns
                 for i in range(4):
                     df_target[f"deg_moment_{i+1}"] = df_target["normalized_degree_moments"].apply(lambda x: x[i] if len(x)>i else 0.0)
+            
+            if "annd" in df_target.columns:
+                df_target["annd"] = df_target["annd"].apply(parse_array)
 
         # Compute moments_error for df_pg_raw by matching (dataset, graph_idx)
         if not df_pg_raw.empty:
@@ -92,14 +135,26 @@ def load_experiment_data() -> Tuple[pd.DataFrame, pd.DataFrame]:
             # Map target moments by (dataset, graph_idx)
             # Use groupby to handle potential duplicate entries if identical splits overlap
             target_moments_dict = {}
+            target_annd_dict = {}
             for (d_name, g_idx), grp in original_df.groupby(["dataset", "graph_idx"]):
-                valid_arrays = [x for x in grp["normalized_degree_moments"].values if len(x) == 4]
-                if valid_arrays:
-                    target_moments_dict[(d_name, g_idx)] = np.mean(valid_arrays, axis=0)
-
-            from src.graph_analysis import calculate_moments_error
+                
+                valid_moments_arrays = [x for x in grp["normalized_degree_moments"].values if len(x) == 4]
+                if valid_moments_arrays:
+                    target_moments_dict[(d_name, g_idx)] = np.mean(valid_moments_arrays, axis=0)
+                
+                valid_annd_arrays = [x for x in grp["annd"].values if isinstance(x, np.ndarray) and len(x) > 0]
+                if valid_annd_arrays:
+                    # Robust aggregation for potentially inhomogeneous vectors (e.g. if the same graph index appeared with minor differences)
+                    max_len = max(len(v) for v in valid_annd_arrays)
+                    padded = np.full((len(valid_annd_arrays), max_len), np.nan)
+                    for i, v in enumerate(valid_annd_arrays):
+                        padded[i, :len(v)] = v
+                    
+                    with np.errstate(divide='ignore', invalid='ignore'):
+                        mean_vec = np.nanmean(padded, axis=0)
+                    target_annd_dict[(d_name, g_idx)] = np.nan_to_num(mean_vec, nan=0.0)
             
-            def compute_error(row):
+            def compute_moments_error(row):
                 ds = row["dataset"]
                 g_idx = row.get("graph_idx", None)
                 if g_idx is None: return np.nan
@@ -110,14 +165,41 @@ def load_experiment_data() -> Tuple[pd.DataFrame, pd.DataFrame]:
                 actual = row["normalized_degree_moments"]
                 if len(actual) != 4: actual = np.zeros(4)
                 return calculate_moments_error(actual, target)
+
+            def compute_annd_error(row):
+                ds = row["dataset"]
+                g_idx = row.get("graph_idx", None)
+                if g_idx is None: return np.nan
                 
-            df_pg_raw["moments_error"] = df_pg_raw.apply(compute_error, axis=1)
-
-            # Also compute an aggregated moments_error for df_raw using (dataset, run_id / aggregate)
-            # Wait, df_raw is aggregated per run, so it doesn't have graph_idx.
-            # We can leave moments_error out of df_raw or do a rough calculation.
-            # The user asked for deg_moment_ columns in df_raw, which we just handled above.
-
+                t_annd = target_annd_dict.get((ds, g_idx))
+                if t_annd is None: return np.nan
+                
+                a_annd = row["annd"]
+                if not isinstance(a_annd, np.ndarray) or len(a_annd) == 0:
+                    a_annd = np.zeros(1)
+                
+                # Determine paths to original/synthetic files
+                t_path = PROJECT_ROOT / "data" / ds / f"{ds}_original.pt"
+                if row["source"] == "original":
+                    a_path = t_path
+                else:
+                    try:
+                        method, variant = row["source"].rsplit("_", 1)
+                        a_path = PROJECT_ROOT / "synthetic_data" / ds / method / f"{ds}_synth_v{variant}.pt"
+                    except ValueError:
+                        return np.nan
+                
+                # Retrieve degree sequences for weighting from files
+                t_deg_seq = get_degree_sequence(t_path, g_idx)
+                a_deg_seq = get_degree_sequence(a_path, g_idx)
+                
+                if t_deg_seq is None or a_deg_seq is None:
+                    return np.nan
+                
+                return calculate_annd_error(a_annd, a_deg_seq, t_annd, t_deg_seq)
+                
+            df_pg_raw["moments_error"] = df_pg_raw.apply(compute_moments_error, axis=1)
+            df_pg_raw["annd_error"] = df_pg_raw.apply(compute_annd_error, axis=1)
     else:
         df_pg_raw = pd.DataFrame()
 
@@ -144,7 +226,7 @@ def compute_radar_bounds(df_pg_ds: pd.DataFrame, avg_v: float, avg_e: float) -> 
     Returns:
         A dictionary mapping each metric to its safe (min, max) boundaries.
     """
-    bounds: dict[str, tuple[float, float]] = {"modularity": (-0.5, 1.0), "clustering": (0.0, 1.0), "assortativity": (-1.0, 1.0), "efficiency": (0.0, 1.0)}
+    bounds: dict[str, tuple[float, float]] = {"modularity": (-0.5, 1.0), "clustering": (0.0, 1.0), "assortativity": (-1.0, 1.0), "efficiency": (0.0, 1.0), "moments_error": (0.0, 1.0), "annd_error": (0.0, 1.0)}
         
     global_90 = df_pg_ds.quantile(0.9, numeric_only=True)
     global_min = df_pg_ds.min(numeric_only=True)
@@ -161,8 +243,6 @@ def compute_radar_bounds(df_pg_ds: pd.DataFrame, avg_v: float, avg_e: float) -> 
     # Moment 4 (Kurtosis): Minimum theoretical is 1. Prevent zoom up to 10.
     m4_max = max(5.0, float(global_90.get("deg_moment_4", 0.0)))
     bounds["deg_moment_4"] = (1.0, m4_max)
-
-    bounds["moments_error"] = (0.0, float(global_90.get("moments_error", 1.0)))
 
     # Motifs: Use 90th percentile to avoid outlier-driven scaling
     for i in range(1, 9):
@@ -183,7 +263,7 @@ def plot_performance_trajectory(df: pd.DataFrame, df_pg: pd.DataFrame, dataset: 
 
     if df_dataset.empty or df_pg_ds.empty or not methods: return
 
-    topo_metrics = ["modularity", "clustering", "assortativity", "efficiency", "moments_error"]
+    topo_metrics = ["modularity", "clustering", "assortativity", "efficiency", "moments_error", "annd_error"]
     moment_metrics = [f"deg_moment_{i}" for i in range(1, 5)]
     motif_metrics = [f"motif_count_{i}" for i in range(1, 9)] if analyze_motifs else []
     all_metrics = topo_metrics + moment_metrics + motif_metrics
@@ -220,7 +300,7 @@ def plot_performance_trajectory(df: pd.DataFrame, df_pg: pd.DataFrame, dataset: 
 
     angles = np.linspace(0, 2 * np.pi, len(all_metrics), endpoint=False).tolist()
     angles += angles[:1]
-    metric_labels = ["Mod", "Clust", "Assort", "Eff", "MErr"] + [f"M{i}" for i in range(1, 5)]
+    metric_labels = ["Mod", "Clust", "Assort", "Eff", "MErr", "AErr"] + [f"M{i}" for i in range(1, 5)]
     if analyze_motifs:
         metric_labels += [f"Motif{i}" for i in range(1, 9)]
 
@@ -328,7 +408,7 @@ def plot_performance_trajectory(df: pd.DataFrame, df_pg: pd.DataFrame, dataset: 
 
     # Display Normalization Bounds
     df_bounds = pd.DataFrame(norm_bounds, index=["Min Bound", "Max Bound"])
-    clean_cols = {"modularity": "Mod", "clustering": "Clust", "assortativity": "Assort", "efficiency": "Eff", "moments_error": "MErr"}
+    clean_cols = {"modularity": "Mod", "clustering": "Clust", "assortativity": "Assort", "efficiency": "Eff", "moments_error": "MErr", "annd_error": "AErr"}
     clean_cols.update({f"deg_moment_{i}": f"M{i}" for i in range(1, 5)})
     
     if analyze_motifs:
@@ -340,7 +420,7 @@ def display_detailed_statistics_table(df_pg: pd.DataFrame, dataset: str, analyze
     if df_pg_ds.empty: return
 
     acc_cols = [c for c in df_pg_ds.columns if c.startswith("mean_acc_")]
-    topo_cols = [c for c in df_pg_ds.columns if c in ["modularity", "clustering", "assortativity", "efficiency", "moments_error"]]
+    topo_cols = [c for c in df_pg_ds.columns if c in ["modularity", "clustering", "assortativity", "efficiency", "moments_error", "annd_error"]]
     moment_cols = [c for c in df_pg_ds.columns if c.startswith("deg_moment_")]
     motif_cols = [c for c in df_pg_ds.columns if c.startswith("motif_count_")] if analyze_motifs else []
     all_metrics = acc_cols + topo_cols + moment_cols + motif_cols
@@ -356,7 +436,7 @@ def display_detailed_statistics_table(df_pg: pd.DataFrame, dataset: str, analyze
         if cl in acc_cols:
             cat_mapping[cl], clean_names[cl] = "Accuracy", cl.replace("mean_acc_", "").upper()
         elif cl in topo_cols:
-            cat_mapping[cl], clean_names[cl] = "Topology", "MErr" if cl == "moments_error" else cl.capitalize()
+            cat_mapping[cl], clean_names[cl] = "Topology", "MErr" if cl == "moments_error" else "AErr" if cl == "annd_error" else cl.capitalize()
         elif cl in moment_cols:
             cat_mapping[cl], clean_names[cl] = "Moments", cl.replace("deg_moment_", "M")
         else:
@@ -499,7 +579,7 @@ def _compute_aggregated_summary_df(df: pd.DataFrame, df_synth: pd.DataFrame, df_
     f1_agg = df.groupby(["dataset", "source_base", "model"], observed=True)["test_f1"].agg(["mean", "std"])
     delta_agg = df_synth.groupby(["dataset", "source_base", "model"], observed=True)["delta_test_f1"].agg(["mean", "std"])
     
-    topo_base = ["modularity", "clustering", "assortativity", "efficiency", "moments_error"]
+    topo_base = ["modularity", "clustering", "assortativity", "efficiency", "moments_error", "annd_error"]
     moment_metrics = sorted([c for c in df_pg.columns if c.startswith("deg_moment_")])
     motif_metrics = sorted([c for c in df_pg.columns if c.startswith("motif_count_")]) if analyze_motifs else []
     all_topo = topo_base + moment_metrics + motif_metrics
@@ -510,7 +590,7 @@ def _compute_aggregated_summary_df(df: pd.DataFrame, df_synth: pd.DataFrame, df_
     c_tuples = []
     for model in MODELS: c_tuples.append(("F1-Score", model))
     for model in MODELS: c_tuples.append(("|Δ F1|", model))
-    for m in topo_base: c_tuples.append(("Topology", "MErr" if m == "moments_error" else m.capitalize()))
+    for m in topo_base: c_tuples.append(("Topology", "MErr" if m == "moments_error" else "AErr" if m == "annd_error" else m.capitalize()))
     for m in moment_metrics: c_tuples.append(("Moments", m.replace("deg_moment_", "M")))
     if analyze_motifs:
         for m in motif_metrics: c_tuples.append(("Motifs", m.replace("motif_count_", "")))

@@ -364,3 +364,48 @@ def calculate_moments_error(obtained_moments: np.ndarray, target_moments: np.nda
     penalty = float(np.mean(losses ** 2.0) ** 0.5)
     
     return penalty
+
+
+def calculate_annd_error(
+    obtained_annd: np.ndarray, obtained_degree_sequence: np.ndarray, 
+    target_annd: np.ndarray, target_degree_sequence: np.ndarray) -> float:
+    r"""Calculates the structural error between obtained ANND and target ANND.
+
+        d(V_1, V_2) = \sqrt{\sum_{k=1}^{K} w(k) \cdot (V_1(k) - V_2(k))^2}
+    
+    where w(k) = \frac{P_1(k) + P_2(k)}{2}
+    
+    Args:
+        obtained_annd: NumPy array of obtained ANND.
+        obtained_degree_sequence: NumPy array of obtained degree sequence.
+        target_annd: NumPy array of target ANND.
+        target_degree_sequence: NumPy array of target degree sequence.
+    Returns:
+        A scalar error value representing the discrepancy in ANND.
+    """
+    len_obtained = len(obtained_annd)
+    len_target = len(target_annd)
+    max_k = max(len_obtained, len_target)
+    
+    # Align lengths if they differ to ensure element-wise operations work.
+    v_obtained = np.pad(obtained_annd, (0, max_k - len_obtained)) if len_obtained < max_k else obtained_annd
+    v_target = np.pad(target_annd, (0, max_k - len_target)) if len_target < max_k else target_annd
+    
+    # Calculate degree distributions P(k) where k is degree (index + 1).
+    # Degree 0 is ignored as ANND is not defined for it.
+    
+    # Target distribution
+    # Slicing from 1 to max_k+1 pulls degrees [1, ..., max_k]
+    p_target = np.bincount(target_degree_sequence, minlength=max_k + 1)[1:max_k + 1] / len(target_degree_sequence)
+        
+    # Obtained distribution
+    p_obtained = np.bincount(obtained_degree_sequence, minlength=max_k + 1)[1:max_k + 1] / len(obtained_degree_sequence)
+
+    # Weights w(k) = (P1(k) + P2(k)) / 2
+    weights = (p_target + p_obtained) * 0.5
+    
+    # Squared differences
+    diff = v_obtained - v_target
+    weighted_variance = np.dot(weights, diff * diff)
+    
+    return float(np.sqrt(weighted_variance))
