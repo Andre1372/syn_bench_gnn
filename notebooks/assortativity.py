@@ -12,6 +12,7 @@ import networkx as nx
 import igraph as ig
 import matplotlib.pyplot as plt
 import seaborn as sns
+from torch_geometric.datasets import TUDataset
 
 # Ensure project root is in path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent if "__file__" in globals() else Path(".").resolve().parent
@@ -30,7 +31,11 @@ DATASET = "MUTAG"
 METHOD = "anndg"  # Options: "padma", "anndg", etc.
 IDX = 0
 
-dataset = DatasetPT(PROJECT_ROOT / "data" / DATASET / f"{DATASET}_original.pt")
+try:
+    dataset = DatasetPT(PROJECT_ROOT / "data" / DATASET / f"{DATASET}_original.pt")
+except:
+    dataset = TUDataset(PROJECT_ROOT / "data", name=DATASET)
+
 GRAPH = pytorch_to_networkx(dataset[IDX])
 
 
