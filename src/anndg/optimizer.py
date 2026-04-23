@@ -80,35 +80,70 @@ def _compute_objective(actual_annd: np.ndarray, target_annd: np.ndarray, weights
     return float(error)
 
 
-def _propose_change(graph_state: GraphState, rng: np.random.Generator) -> GraphChange | None:
+def _propose_change(graph_state: GraphState, degree_distribution: np.ndarray, degrees_over_annd: np.ndarray, degrees_under_annd: np.ndarray, rng: np.random.Generator) -> GraphChange | None:
     """Propose a random degree-preserving double edge swap."""
     if graph_state.num_edges < 2:
         return None
         
-    e1 = graph_state.get_random_edge(rng)
-    e2 = graph_state.get_random_edge(rng)
+    # e1 = graph_state.get_random_edge(rng)
+    # e2 = graph_state.get_random_edge(rng)
     
-    u, v = e1
-    x, y = e2
+    # u, v = e1
+    # x, y = e2
+
+    # # Validity check (1): no shared nodes among sampled edges (avoids creating self-loops)
+    # if len({u, v, x, y}) != 4:
+    #     return None
+
+    # # Coin flip for symmetric proposals (Cross vs Parallel)
+    # if rng.integers(0, 2) == 0:
+    #     proposed_edges = [(u, y), (x, v)]
+    # else:
+    #     proposed_edges = [(u, x), (v, y)]
+
+    # # Validity check (2): proposed new edges do not already exist (preserves simple graph property)
+    # for a, b in proposed_edges:
+    #     if graph_state.has_edge(a, b):
+    #         return None
+
+    # return GraphChange(
+    #     edges_to_add=proposed_edges,
+    #     edges_to_remove=[e1, e2]
+    # )
+
+    # p1 = degree_distribution[degrees_over_annd - 1] / np.sum(degree_distribution[degrees_over_annd - 1])
+    # p2 = degree_distribution[degrees_under_annd - 1] / np.sum(degree_distribution[degrees_under_annd - 1])
+
+    deg1 = rng.choice(degrees_over_annd)
+    deg2 = rng.choice(degrees_under_annd)
+
+    # Validity check (1): Not sampled degree 0
+    if deg1 == 0 or deg2 == 0:
+        print(f"Deg1: {deg1}, Deg2: {deg2}")
+        return None
+
+    u = graph_state.get_random_node_by_degree(deg1, rng)
+    x = graph_state.get_neighbor_proportional_to_degree(u, rng)
+
+    v = graph_state.get_random_node_by_degree(deg2, rng)    
+    y = graph_state.get_neighbor_proportional_to_degree(x, rng, inverse=True)
 
     # Validity check (1): no shared nodes among sampled edges (avoids creating self-loops)
     if len({u, v, x, y}) != 4:
+        print(f"Shared nodes: {u, v, x, y}")
         return None
 
-    # Coin flip for symmetric proposals (Cross vs Parallel)
-    if rng.integers(0, 2) == 0:
-        proposed_edges = [(u, y), (x, v)]
-    else:
-        proposed_edges = [(u, x), (v, y)]
-
+    proposed_edges = [(u, v), (x, y)]
+    
     # Validity check (2): proposed new edges do not already exist (preserves simple graph property)
     for a, b in proposed_edges:
         if graph_state.has_edge(a, b):
+            print(f"Edge ({a}, {b}) already exists")
             return None
 
     return GraphChange(
         edges_to_add=proposed_edges,
-        edges_to_remove=[e1, e2]
+        edges_to_remove=[(u, x), (v, y)]
     )
 
 
@@ -116,7 +151,7 @@ def optimizer(
     initial_graph: ig.Graph, 
     target_annd: np.ndarray, 
     rng: np.random.Generator | None = None, 
-    debug: bool = False
+    debug: bool = True
 ) -> GraphState:
     """
     Optimizes a graph's ANND (Average Nearest Neighbor Degree) to match a target vector.
@@ -140,11 +175,19 @@ def optimizer(
     target_annd_adapted = _adapt_target_dimension(initial_annd, target_annd)
     degree_distribution = _get_degree_distribution(initial_graph)[1:]  # exclude degree = 0
 
+    # Compute currently wrong indices (only for degrees present in the graph)
+    present_mask = (degree_distribution > 0)
+    degrees_over_annd = np.where(present_mask & (initial_annd >= target_annd_adapted))[0] + 1 # Taslate by one because deg 0 is removed
+    degrees_under_annd = np.where(present_mask & (initial_annd < target_annd_adapted))[0] + 1
+
     if debug:
         print(f"{'Degree distribution:':<40} {degree_distribution}")
         print(f"{'Initial ANND:':<40} {initial_annd}")
         print(f"{'Target ANND:':<40} {target_annd}")
         print(f"{'Target ANND (adapted):':<40} {target_annd_adapted}")
+        print(f"{'Indices present:':<40} {np.where(present_mask)[0]}")
+        print(f"{'Degrees over ANND:':<40} {degrees_over_annd}")
+        print(f"{'Degrees under ANND:':<40} {degrees_under_annd}")
 
     # Track metrics
     current_error = _compute_objective(initial_annd, target_annd_adapted, weights=degree_distribution)
@@ -157,7 +200,7 @@ def optimizer(
         print(f"{'Initial ANND error:':<40} {current_error:.6f}")
 
     # Optimization loop parameters
-    max_steps = 10000
+    max_steps = 100
     patience = 500
     steps_without_improvement = 0
     temperature = 1.0
@@ -165,7 +208,7 @@ def optimizer(
     
     # Main loop
     for step in range(max_steps):
-        change = _propose_change(graph_state, rng)
+        change = _propose_change(graph_state, degree_distribution, degrees_over_annd, degrees_under_annd, rng)
         steps_without_improvement += 1
         
         # State transitions without proposals skip evaluations
@@ -178,17 +221,25 @@ def optimizer(
 
         # Propose state change
         graph_state.apply_change(change)
-        proposed_error = _compute_objective(graph_state.get_annd(), target_annd_adapted, weights=degree_distribution)
+        proposed_annd = graph_state.get_annd()
+        proposed_error = _compute_objective(proposed_annd, target_annd_adapted, weights=degree_distribution)
         
         if rng.random() < np.exp((best_error - proposed_error) / temperature):
             # accept
+            print("Accepting change")
             current_error = proposed_error
+
+            # Compute currently wrong indices (only for degrees present in the graph)
+            degrees_over_annd = np.where(present_mask & (proposed_annd >= target_annd_adapted))[0] + 1
+            degrees_under_annd = np.where(present_mask & (proposed_annd < target_annd_adapted))[0] + 1
+
             if current_error < best_error:
                 best_error = current_error
                 best_state = graph_state.copy()
                 steps_without_improvement = 0
         else:
             # reject
+            print("Rejecting change")
             graph_state.revert_change(change)
         
         # Temperature decay

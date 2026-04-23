@@ -50,6 +50,11 @@ class GraphState:
                 self._edge_to_idx[edge] = len(self._edges)
                 self._edges.append(edge)
 
+        self._node_degrees: np.ndarray = np.array([len(adj) for adj in self._adj_list], dtype=np.int32)
+        self._nodes_by_degree: dict[int, np.ndarray] = {}
+        for k in np.unique(self._node_degrees):
+            self._nodes_by_degree[k] = np.where(self._node_degrees == k)[0]
+
     @property
     def num_nodes(self) -> int:
         """Returns the number of nodes in the graph."""
@@ -79,6 +84,34 @@ class GraphState:
         idx = rng.integers(0, len(self._edges))
         return self._edges[idx]
 
+    def get_random_node_by_degree(self, k: int, rng: np.random.Generator) -> int | None:
+        """Sample a node uniformly at random among those with degree k."""
+        nodes = self._nodes_by_degree.get(k)
+        if nodes is None or len(nodes) == 0:
+            return None
+        
+        idx = rng.integers(0, len(nodes))
+        return int(nodes[idx])
+
+    def get_neighbor_proportional_to_degree(self, u: int, rng: np.random.Generator, inverse: bool = False) -> int | None:
+        """Sample a node v from the neighborhood of u with probability proportional to d(v) (or 1/d(v) if inverse is True)."""
+        if not self._adj_list[u]:
+            return None
+        
+        neighbors = list(self._adj_list[u])
+        weights = self._node_degrees[neighbors].astype(float)
+
+        if inverse:
+            weights = 1.0 / weights
+        
+        cum_weights = np.cumsum(weights)
+        total_weight = cum_weights[-1]
+        
+        r = rng.random() * total_weight
+        idx = np.searchsorted(cum_weights, r)
+        
+        return int(neighbors[idx])
+
     def get_annd(self) -> np.ndarray:
         """Calculates the Average Nearest Neighbor Degree (ANND) for each degree.
         
@@ -107,6 +140,8 @@ class GraphState:
         new_state._adj_list = [set(adj) for adj in self._adj_list]
         new_state._edges = list(self._edges)
         new_state._edge_to_idx = dict(self._edge_to_idx)
+        new_state._node_degrees = self._node_degrees
+        new_state._nodes_by_degree = self._nodes_by_degree
         return new_state
 
     def apply_change(self, change: GraphChange) -> None:
