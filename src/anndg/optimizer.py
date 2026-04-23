@@ -116,7 +116,7 @@ def optimizer(
     initial_graph: ig.Graph, 
     target_annd: np.ndarray, 
     rng: np.random.Generator | None = None, 
-    debug: bool = True
+    debug: bool = False
 ) -> GraphState:
     """
     Optimizes a graph's ANND (Average Nearest Neighbor Degree) to match a target vector.
@@ -157,11 +157,11 @@ def optimizer(
         print(f"{'Initial ANND error:':<40} {current_error:.6f}")
 
     # Optimization loop parameters
-    max_steps = 1000
+    max_steps = 10000
     patience = 500
     steps_without_improvement = 0
     temperature = 1.0
-    cooling = 0.996
+    cooling = 10**(-3/max_steps) #0.998
     
     # Main loop
     for step in range(max_steps):
@@ -178,16 +178,18 @@ def optimizer(
 
         # Propose state change
         graph_state.apply_change(change)
-        current_error = _compute_objective(graph_state.get_annd(), target_annd_adapted, weights=degree_distribution)
+        proposed_error = _compute_objective(graph_state.get_annd(), target_annd_adapted, weights=degree_distribution)
         
-        if current_error < best_error:
-            best_error = current_error
-            best_state = graph_state.copy()
-            steps_without_improvement = 0
+        if rng.random() < np.exp((best_error - proposed_error) / temperature):
+            # accept
+            current_error = proposed_error
+            if current_error < best_error:
+                best_error = current_error
+                best_state = graph_state.copy()
+                steps_without_improvement = 0
         else:
-            if rng.random() < np.exp((best_error - current_error) / temperature):
-                graph_state.revert_change(change)
-                current_error = best_error  # reset current error
+            # reject
+            graph_state.revert_change(change)
         
         # Temperature decay
         temperature *= cooling
