@@ -119,8 +119,8 @@ def analyze_single_graph(graph: ig.Graph) -> dict[str, float]:
     annd = calculate_annd(graph)
 
     stats_dict: dict[str, float] = {
-        "n_nodes": float(graph.vcount()),
-        "n_edges": float(graph.ecount()),
+        "n_nodes": int(graph.vcount()),
+        "n_edges": int(graph.ecount()),
         "modularity": modularity,
         "clustering": clustering,
         "assortativity": assortativity,

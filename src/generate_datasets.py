@@ -17,12 +17,12 @@ from src.graph_analysis import per_graph_statistics, aggregate_statistics_per_cl
 
 from src.padma.graph_generator import generate_graph as padma_generate_graph
 from src.ergm.graph_generator import ergm_fit_sample
-
+from src.anndg.graph_generator import generate_graph as anndg_generate_graph
 
 logger = logging.getLogger(__name__)
 
 
-KNOWN_METHODS: frozenset[str] = frozenset({"padma", "pdd", "ergm", "dummyEdges", "dummyNodes"})
+KNOWN_METHODS: frozenset[str] = frozenset({"padma", "pdd", "ergm", "dummyEdges", "dummyNodes", "anndg"})
 
 
 def generate_graph(target_stats: dict[str, Any], method: str, rng: np.random.Generator) -> nx.Graph:
@@ -42,11 +42,12 @@ def generate_graph(target_stats: dict[str, Any], method: str, rng: np.random.Gen
         ValueError: If the method is not supported or required data is missing.
     """
     if method == "padma":
-        # Probabilistic Annealing for Degree Moments Alignment.
         G_nx, _ = padma_generate_graph(target_stats, rng)
         return G_nx
+    elif method == "anndg":
+        G_nx, _ = anndg_generate_graph(target_stats, rng)
+        return G_nx
     elif method == "pdd":
-        # Preserving degree distribution: using double edge swaps.
         if "observed_nx" not in target_stats: raise ValueError("Method 'pdd' requires 'observed_nx' in target_stats.")
         
         G_nx = target_stats["observed_nx"].copy()

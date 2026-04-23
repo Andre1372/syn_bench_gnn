@@ -1,4 +1,4 @@
-""" Graph Generator for dmgA (Axel's DMG) """
+""" Graph Generator for PADMA (Probabilistic Annealing for Degree Moments Alignment) """
 
 import numpy as np
 import networkx as nx
