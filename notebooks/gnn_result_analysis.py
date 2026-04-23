@@ -163,7 +163,6 @@ def load_experiment_data() -> Tuple[pd.DataFrame, pd.DataFrame]:
                 if target is None: return np.nan
                 
                 actual = row["normalized_degree_moments"]
-                if len(actual) != 4: actual = np.zeros(4)
                 return calculate_moments_error(actual, target)
 
             def compute_annd_error(row):
@@ -493,7 +492,21 @@ def display_detailed_statistics_table(df_pg: pd.DataFrame, dataset: str, analyze
     display(_styler(df_final.style))
 
 for ds in DATASETS:
-    plot_performance_trajectory(df_raw, df_pg_raw, ds, qq_metric="assortativity", variants_idx=[1, 2, 3, 4, 5], analyze_motifs=False)
+    plot_performance_trajectory(df_raw, df_pg_raw, ds, qq_metric="moments_error", variants_idx=[1, 2, 3, 4, 5], analyze_motifs=False)
+
+    # --- Debugging high MErr (moments_error) graphs ---
+    df_ds = df_pg_raw[df_pg_raw["dataset"] == ds]
+    df_ds = df_ds[df_ds["method"] == "anndg"]
+    if not df_ds.empty and "moments_error" in df_ds.columns:
+        median_err = df_ds["moments_error"].median()
+        # Heuristic: > 5.0 absolute or > 10x median
+        threshold = max(5.0, median_err * 10) 
+        
+        outliers = df_ds[df_ds["moments_error"] > threshold].sort_values("moments_error", ascending=False)
+        if not outliers.empty:
+            print(f"\n[DEBUG] Abnormal MErr detected in dataset: {ds} (Threshold: {threshold:.2f})")
+            display(outliers[["source", "graph_idx", "label", "moments_error"]].head(10))
+
     # display_detailed_statistics_table(df_pg_raw, ds, analyze_motifs=True)
 
 

@@ -334,28 +334,32 @@ def calculate_moments_error(obtained_moments: np.ndarray, target_moments: np.nda
         A scalar error value representing the discrepancy in degree moments.
     """
     moment_losses = []
-    var_penalty_weight=1.0
-    skew_penalty_weight=0.5
-    kurt_penalty_weight=0.5
     
     # Variance loss
     var_actual, var_target = obtained_moments[1], target_moments[1]
     var_scale = min(abs(var_actual), abs(var_target)) + 1e-6
     var_err = abs(var_actual - var_target) / var_scale
-    moment_losses.append(var_penalty_weight * np.log1p(var_err) ** 2.5)
+    moment_losses.append(np.log1p(var_err) ** 2.5)
     
     # Skewness loss (evaluated only when variance is stable)
     if var_actual > 1e-12:
         skew_actual, skew_target = obtained_moments[2], target_moments[2]
-        skew_scale = min(abs(skew_actual), abs(skew_target)) + 1e-6
-        skew_err = abs(skew_actual - skew_target) / skew_scale
-        moment_losses.append(skew_penalty_weight * np.log1p(skew_err) ** 2.5)
+        
+        if skew_actual < 1e-6 and skew_target < 1e-6:
+            moment_losses.append(0)
+        else:
+            skew_actual_abs = abs(skew_actual)
+            skew_target_abs = abs(skew_target)
+            skew_scale = min(skew_actual_abs, skew_target_abs) if min(skew_actual_abs, skew_target_abs) > 1e-6 else max(skew_actual_abs, skew_target_abs) / 2
+
+            skew_err = abs(skew_actual - skew_target) / skew_scale
+            moment_losses.append(np.log1p(skew_err) ** 2.5)
         
     # Kurtosis loss
     kurt_actual, kurt_target = obtained_moments[3], target_moments[3]
     kurt_scale = min(abs(kurt_actual), abs(kurt_target)) + 1e-6
     kurt_err = abs(kurt_actual - kurt_target) / kurt_scale
-    moment_losses.append(kurt_penalty_weight * np.log1p(kurt_err) ** 2.5)
+    moment_losses.append(np.log1p(kurt_err) ** 2.5)
     
     if not moment_losses: return 0.0
         
