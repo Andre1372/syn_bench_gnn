@@ -185,14 +185,7 @@ def load_experiment_data() -> Tuple[pd.DataFrame, pd.DataFrame]:
                 valid_annd_arrays = [x for x in grp["annd"].values if isinstance(x, np.ndarray) and len(x) > 0]
                 if valid_annd_arrays:
                     # Robust aggregation for potentially inhomogeneous vectors (e.g. if the same graph index appeared with minor differences)
-                    max_len = max(len(v) for v in valid_annd_arrays)
-                    padded = np.full((len(valid_annd_arrays), max_len), np.nan)
-                    for i, v in enumerate(valid_annd_arrays):
-                        padded[i, :len(v)] = v
-                    
-                    with np.errstate(divide='ignore', invalid='ignore'):
-                        mean_vec = np.nanmean(padded, axis=0)
-                    target_annd_dict[(d_name, g_idx)] = np.nan_to_num(mean_vec, nan=0.0)
+                    target_annd_dict[(d_name, g_idx)] = np.mean(valid_annd_arrays, axis=0)
 
                 target_diameter_dict[(d_name, g_idx)] = grp["diameter"].mean()
             

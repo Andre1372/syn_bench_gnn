@@ -50,6 +50,8 @@ class GraphState:
                 self._edge_to_idx[edge] = len(self._edges)
                 self._edges.append(edge)
 
+        self._degrees = np.array(graph.degree(), dtype=int)
+
     @property
     def num_nodes(self) -> int:
         """Returns the number of nodes in the graph."""
@@ -79,24 +81,37 @@ class GraphState:
         idx = rng.integers(0, len(self._edges))
         return self._edges[idx]
 
-    def get_annd(self) -> np.ndarray:
-        """Calculates the Average Nearest Neighbor Degree (ANND) for each degree.
-        
-        Returns:
-            A numpy array where entry k is the average degree of neighbors of nodes with degree k.
+    def get_annd(self, bins:int = 5) -> np.ndarray:
         """
-        if self._num_nodes == 0: return np.array([], dtype=float)
+        Computes the Average Nearest Neighbor Degree (ANND) of the graph, normalizes it and bins it into percentiles.
 
-        _, knnk = self.get_graph().knn()
+        ANND characterizes degree-degree correlations. The function normalizes neighbor degrees 
+        by the maximum possible degree (N-1) and aggregates nodes into 'bins' percentile groups 
+        based on their degree rank.
 
-        if not knnk or len(knnk) <= 1:
-            # This occurs if max_degree is 0 or if the graph is empty.
-            return np.array([], dtype=float)
+        Args:
+            bins: The number of percentile bins to aggregate into.
+        Returns:
+            np.ndarray: Array of length `bins` containing the mean normalized ANND per bin.
+        """
+        if self._num_nodes == 0: return np.zeros(bins, dtype=float)
 
-        annd = np.array(knnk, dtype=float)
+        knn_nodes, _ = self.get_graph().knn()
 
-        # Handle NaNs for degrees present in the range [1, max_k] but absent in the graph.
-        return np.nan_to_num(annd, nan=0.0)
+        if not knn_nodes: return np.zeros(bins, dtype=float)
+
+        # Normalize by (N-1) and handle NaNs from isolated nodes
+        annd_raw = np.array(knn_nodes, dtype=float)
+        annd_norm = np.nan_to_num(annd_raw / (self._num_nodes - 1), nan=0.0)
+
+        # Sort ANND by degree rank to enable grouping into percentile bins
+        sorted_annd = annd_norm[np.argsort(self._degrees)]
+
+        # Partition and average using array_split to handle non-divisible N_nodes gracefully
+        return np.array([
+            group.mean() if group.size > 0 else 0.0 
+            for group in np.array_split(sorted_annd, bins)
+        ], dtype=float)
 
     def copy(self) -> 'GraphState':
         """Creates a deep copy of the current state."""

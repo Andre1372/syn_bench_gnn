@@ -8,75 +8,42 @@ import matplotlib.pyplot as plt
 from src.anndg.graph_state import GraphState, GraphChange
 
 
-def _adapt_target_dimension(actual_annd: np.ndarray, target_annd: np.ndarray) -> np.ndarray:
+def _get_binned_degree_distribution(degrees: np.ndarray, bins: int) -> np.ndarray:
     """
-    Adjusts the target Average Nearest Neighbor Degree (ANND) vector to align with the current 
-    graph's degree range and fills missing observations.
-
-    This function handles two main alignment issues: Missing Degrees, Dimension Mismatch.
-
-    Phases:
-    - PHASE 1 (Interpolation): Uses linear interpolation to fill internal gaps where target_annd < 1.
-    - PHASE 2 (Extrapolation): Applies a quadratic decay both backward and forward to extend the target vector.
+    Bins the degree distribution into percentile groups and returns the mean degree per bin.
 
     Args:
-        actual_annd: ANND vector of the graph being optimized. Used to determine the required range.
-        target_annd: The reference ANND vector to match.
+        degrees: Array of node degrees.
+        bins: Number of percentile bins.
     Returns:
-        np.ndarray: A target ANND vector of length max(len(actual), len(target)).
+        np.ndarray: Array of length `bins` containing the mean degree per bin.
     """
-    len_actual = len(actual_annd)
-    len_target = len(target_annd)
-
-    # PHASE 1: Filling
-    valid_mask = (target_annd >= 1)
-    valid_indices = np.where(valid_mask)[0]
-    filled_target = np.interp(np.arange(len_target), valid_indices, target_annd[valid_indices])
+    if len(degrees) == 0:
+        return np.zeros(bins, dtype=float)
     
-    # PHASE 2: Extension
-    # Backward
-    first_valid_idx = valid_indices[0]
-    if first_valid_idx > 0:
-        first_val = target_annd[first_valid_idx]
-        steps_back = first_valid_idx - np.arange(first_valid_idx)
-        left_decay = first_val * (1 - 0.05 * (steps_back**2))
-        filled_target[:first_valid_idx] = np.maximum(left_decay, 1)
-
-    # Forward
-    num_to_add = len_actual - len_target
-    if num_to_add > 0:
-        last_val = filled_target[-1]
-        steps_fwd = np.arange(1, num_to_add + 1)
-        right_decay = last_val * (1 - 0.05 * (steps_fwd**2))
-        final_target = np.concatenate((filled_target, np.maximum(right_decay, 1)))
-    else:
-        final_target = filled_target[:len_actual]
-    
-    return final_target
-
-
-def _get_degree_distribution(graph: ig.Graph) -> np.ndarray:
-    """
-    Calculates the normalized degree distribution of the graph using igraph.
-    
-    Args:
-        graph: The igraph.Graph instance.
-    Returns:
-        np.ndarray: An array where entry i is the fraction of nodes with degree i.
-    """
-    n = graph.vcount()
-    if n == 0: 
-        return np.array([], dtype=float)
-    
-    degrees = graph.degree()
-    counts = np.bincount(degrees)
-    return counts / n
+    # Sort degrees and partition into percentile bins
+    sorted_degrees = np.sort(degrees)
+    return np.array([
+        group.mean() if group.size > 0 else 0.0 
+        for group in np.array_split(sorted_degrees, bins)
+    ], dtype=float)
 
 
 def _compute_objective(actual_annd: np.ndarray, target_annd: np.ndarray, weights: np.ndarray) -> float:
-    """Compute the weighted L2 distance objective function between the actual and target ANND."""
-    diff = actual_annd - target_annd
-    error = np.sqrt(np.dot(weights, diff * diff))
+    """
+    Computes a weighted Log-Cosh objective function between actual and target ANND.
+    """
+    # [OBSOLETE] Weighted L2 implementation:
+    # diff = actual_annd - target_annd
+    # error = np.sqrt(np.dot(weights, diff * diff))
+    # return float(error)
+
+    # # Advanced Log-Cosh implementation: sum(w_i * log(cosh(10 * delta_i)))
+    # # We use a numerically stable identity: log(cosh(x)) = |x| - log(2) + log(1 + exp(-2|x|))
+    x = 10.0 * (actual_annd - target_annd)
+    log_cosh = np.abs(x) - np.log(2.0) + np.log1p(np.exp(-2.0 * np.abs(x)))
+    error = np.dot(weights, log_cosh)
+    
     return float(error)
 
 
@@ -131,23 +98,22 @@ def optimizer(
     """
     rng = rng or np.random.default_rng()
     target_annd = np.asarray(target_annd, dtype=float)
+    bins = len(target_annd)
 
     # Initialize graph state
     graph_state = GraphState(initial_graph)
-    initial_annd = graph_state.get_annd()
+    initial_annd = graph_state.get_annd(bins=bins)
     
-    # Adapt target vectors and precompute fixed factors
-    target_annd_adapted = _adapt_target_dimension(initial_annd, target_annd)
-    degree_distribution = _get_degree_distribution(initial_graph)[1:]  # exclude degree = 0
+    # Compute binned degree distribution for weighting (matches the binning in get_annd)
+    degree_distribution = _get_binned_degree_distribution(graph_state._degrees, bins=bins)
 
     if debug:
         print(f"{'Degree distribution:':<40} {degree_distribution}")
         print(f"{'Initial ANND:':<40} {initial_annd}")
         print(f"{'Target ANND:':<40} {target_annd}")
-        print(f"{'Target ANND (adapted):':<40} {target_annd_adapted}")
 
     # Track metrics
-    current_error = _compute_objective(initial_annd, target_annd_adapted, weights=degree_distribution)
+    current_error = _compute_objective(initial_annd, target_annd, weights=degree_distribution)
     best_error = current_error
     best_state = graph_state.copy()
     
@@ -178,7 +144,7 @@ def optimizer(
 
         # Propose state change
         graph_state.apply_change(change)
-        proposed_error = _compute_objective(graph_state.get_annd(), target_annd_adapted, weights=degree_distribution)
+        proposed_error = _compute_objective(graph_state.get_annd(bins=bins), target_annd, weights=degree_distribution)
         
         if rng.random() < np.exp((best_error - proposed_error) / temperature):
             # accept

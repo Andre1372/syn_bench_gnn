@@ -168,31 +168,42 @@ def count_deg_moments(graph: ig.Graph) -> np.ndarray:
     return np.array([m1, m2, m3, m4])
 
 
-def calculate_annd(graph: ig.Graph) -> np.ndarray:
-    """Calculates the average nearest neighbor degree (ANND) of the graph.
+def calculate_annd(graph: ig.Graph, bins: int = 4) -> np.ndarray:
+    """
+    Computes the Average Nearest Neighbor Degree (ANND) of the graph, normalizes it and bins it into percentiles.
 
-    The ANND(k) is the average degree of the neighbours of a node of degree k.
-    This metric characterizes degree-degree correlations.
+    ANND characterizes degree-degree correlations. The function normalizes neighbor degrees 
+    by the maximum possible degree (N-1) and aggregates nodes into 'bins' percentile groups 
+    based on their degree rank.
 
     Args:
-        graph: The input igraph.Graph.
+        graph: The igraph.Graph object to analyze.
+        bins: The number of percentile bins to aggregate into.
     Returns:
-        A NumPy array where the element at index k stores the ANND for degree k+1.
-        (Index 0 corresponds to degree 1, as degree 0 is not stored).
-        The length of the array is equal to the maximum degree in the graph.
+        np.ndarray: Array of length `bins` containing the mean normalized ANND per bin.
     """
-    if graph.vcount() == 0: return np.array([], dtype=float)
+    n_nodes = graph.vcount()
+    if n_nodes == 0:
+        return np.zeros(bins, dtype=float)
 
-    _, knnk = graph.knn()
+    knn_nodes, _ = graph.knn()
+    
+    if not knn_nodes:
+        return np.zeros(bins, dtype=float)
 
-    if not knnk or len(knnk) <= 1:
-        # This occurs if max_degree is 0 or if the graph is empty.
-        return np.array([], dtype=float)
+    # Normalize by (N-1) and handle NaNs from isolated nodes
+    annd_raw = np.array(knn_nodes, dtype=float)
+    annd_norm = np.nan_to_num(annd_raw / (n_nodes - 1), nan=0.0)
 
-    annd = np.array(knnk, dtype=float)
+    # Sort ANND by degree rank to enable grouping into percentile bins
+    node_degrees = np.array(graph.degree(), dtype=int)
+    sorted_annd = annd_norm[np.argsort(node_degrees)]
 
-    # Handle NaNs for degrees present in the range [1, max_k] but absent in the graph.
-    return np.nan_to_num(annd, nan=0.0)
+    # Partition and average using array_split to handle non-divisible N_nodes gracefully
+    return np.array([
+        group.mean() if group.size > 0 else 0.0 
+        for group in np.array_split(sorted_annd, bins)
+    ], dtype=float)
 
 
 def count_motifs(graph: ig.Graph, k: int, sampling_probs: list[float] | None = None) -> np.ndarray:
@@ -387,10 +398,6 @@ def calculate_annd_error(
     obtained_annd: np.ndarray, obtained_degree_sequence: np.ndarray, 
     target_annd: np.ndarray, target_degree_sequence: np.ndarray) -> float:
     r"""Calculates the structural error between obtained ANND and target ANND.
-
-        d(V_1, V_2) = \sqrt{\sum_{k=1}^{K} w(k) \cdot (V_1(k) - V_2(k))^2}
-    
-    where w(k) = \frac{P_1(k) + P_2(k)}{2}
     
     Args:
         obtained_annd: NumPy array of obtained ANND.
@@ -399,30 +406,26 @@ def calculate_annd_error(
         target_degree_sequence: NumPy array of target degree sequence.
     Returns:
         A scalar error value representing the discrepancy in ANND.
-    """
-    len_obtained = len(obtained_annd)
-    len_target = len(target_annd)
-    max_k = max(len_obtained, len_target)
-    
-    # Align lengths if they differ to ensure element-wise operations work.
-    v_obtained = np.pad(obtained_annd, (0, max_k - len_obtained)) if len_obtained < max_k else obtained_annd
-    v_target = np.pad(target_annd, (0, max_k - len_target)) if len_target < max_k else target_annd
-    
-    # Calculate degree distributions P(k) where k is degree (index + 1).
-    # Degree 0 is ignored as ANND is not defined for it.
-    
+    """    
+    bins = len(obtained_annd)
+
     # Target distribution
     # Slicing from 1 to max_k+1 pulls degrees [1, ..., max_k]
-    p_target = np.bincount(target_degree_sequence, minlength=max_k + 1)[1:max_k + 1] / len(target_degree_sequence)
+    p_target = np.bincount(target_degree_sequence, minlength=bins + 1)[1:bins + 1] / len(target_degree_sequence)
         
     # Obtained distribution
-    p_obtained = np.bincount(obtained_degree_sequence, minlength=max_k + 1)[1:max_k + 1] / len(obtained_degree_sequence)
+    p_obtained = np.bincount(obtained_degree_sequence, minlength=bins + 1)[1:bins + 1] / len(obtained_degree_sequence)
 
     # Weights w(k) = (P1(k) + P2(k)) / 2
     weights = (p_target + p_obtained) * 0.5
     
     # Squared differences
-    diff = v_obtained - v_target
+    diff = obtained_annd - target_annd
     weighted_variance = np.dot(weights, diff * diff)
+    error = np.sqrt(weighted_variance)
+
+    # x = 10.0 * (actual_annd - target_annd)
+    # log_cosh = np.abs(x) - np.log(2.0) + np.log1p(np.exp(-2.0 * np.abs(x)))
+    # error = np.dot(weights, log_cosh)
     
-    return float(np.sqrt(weighted_variance))
+    return float(error)
