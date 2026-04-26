@@ -102,13 +102,18 @@ def maxent_optimize_discrete(target_sum, target_var, n_samples, max_value,
         # Per-moment losses aggregated with an Lp norm.
         # p>2 emphasizes the largest residual smoothly (cleaner than hard max).
         moment_losses = []
+
+        def _compute_metric_loss(actual_value, target_value):
+            a = np.arcsinh(actual_value)
+            b = np.arcsinh(target_value)
+            loss = np.abs(a - b)**1.5
+
+            # scale = min(abs(actual_value), abs(target_value)) + 1e-6
+            # error = abs(actual_value - target_value) / scale
+            # loss = np.log1p(error) ** 2.5
+            return loss
         
-        # Relative error with symmetric scale.
-        # Using only target in denominator saturates near 1.0 when actual_var << target_var,
-        # which makes very bad under-variance states look only mildly wrong.
-        var_scale = min(actual_var, target_var) + 1e-6
-        var_pct_error = abs(actual_var - target_var) / var_scale
-        var_loss = var_penalty_weight * np.log1p(var_pct_error) ** 2.5
+        var_loss = var_penalty_weight * _compute_metric_loss(actual_var, target_var)
         moment_losses.append(var_loss)
         
         # Skewness (secondary constraint): log of percentage error
@@ -121,9 +126,7 @@ def maxent_optimize_discrete(target_sum, target_var, n_samples, max_value,
                 actual_skew = m3 / denom_skew
 
                 if np.isfinite(actual_skew):
-                    skew_scale = min(abs(actual_skew), abs(target_skew)) + 1e-6
-                    skew_pct_error = abs(actual_skew - target_skew) / skew_scale
-                    skew_loss = skew_penalty_weight * np.log1p(skew_pct_error) ** 2.5
+                    skew_loss = skew_penalty_weight * _compute_metric_loss(actual_skew, target_skew)
                     moment_losses.append(skew_loss)
         
         # Kurtosis (secondary constraint): log of percentage error
@@ -136,9 +139,7 @@ def maxent_optimize_discrete(target_sum, target_var, n_samples, max_value,
                     actual_kurt = 0.0
             else:
                 actual_kurt = 0.0
-            kurt_scale = min(abs(actual_kurt), abs(target_kurt)) + 1e-6
-            kurt_pct_error = abs(actual_kurt - target_kurt) / kurt_scale
-            kurt_loss = kurt_penalty_weight * np.log1p(kurt_pct_error) ** 2.5
+            kurt_loss = kurt_penalty_weight * _compute_metric_loss(actual_kurt, target_kurt)
             moment_losses.append(kurt_loss)
 
         p_norm = 2.0

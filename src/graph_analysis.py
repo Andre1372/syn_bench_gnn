@@ -116,6 +116,7 @@ def analyze_single_graph(graph: ig.Graph) -> dict[str, float]:
     clustering = calculate_clustering_coefficient(graph)
     assortativity = calculate_degree_assortativity(graph)
     efficiency = calculate_global_efficiency(graph)
+    diameter = calculate_diameter(graph)
     annd = calculate_annd(graph)
 
     stats_dict: dict[str, float] = {
@@ -125,6 +126,7 @@ def analyze_single_graph(graph: ig.Graph) -> dict[str, float]:
         "clustering": clustering,
         "assortativity": assortativity,
         "efficiency": efficiency,
+        "diameter": diameter,
         "annd": annd,
         "normalized_degree_moments": deg_moments
     }
@@ -319,6 +321,23 @@ def calculate_global_efficiency(graph: ig.Graph) -> float:
     return float(np.sum(inv_dist) / (n * (n - 1)))
 
 
+def calculate_diameter(graph: ig.Graph) -> float:
+    """Calculates the diameter of the graph.
+
+    For disconnected graphs, returns the diameter of the largest connected component.
+
+    Args:
+        graph: The input igraph.Graph.
+    Returns:
+        The diameter of the graph as a float. Returns 0.0 if the graph is empty.
+    """
+    if graph.vcount() == 0: return 0.0
+    
+    # igraph.diameter() returns the length of the longest shortest path.
+    # By default, unconn=True returns the max diameter among all components.
+    return float(graph.diameter(directed=False, unconn=True))    
+
+
 def calculate_moments_error(obtained_moments: np.ndarray, target_moments: np.ndarray) -> float:
     """Calculates the structural error between obtained degree moments and target moments.
     
@@ -334,32 +353,26 @@ def calculate_moments_error(obtained_moments: np.ndarray, target_moments: np.nda
         A scalar error value representing the discrepancy in degree moments.
     """
     moment_losses = []
-    
+
+    def _compute_metric_loss(actual_value, target_value):
+        a = np.arcsinh(actual_value)
+        b = np.arcsinh(target_value)
+        loss = np.abs(a - b)**1.5
+
+        return loss
+
     # Variance loss
     var_actual, var_target = obtained_moments[1], target_moments[1]
-    var_scale = min(abs(var_actual), abs(var_target)) + 1e-6
-    var_err = abs(var_actual - var_target) / var_scale
-    moment_losses.append(np.log1p(var_err) ** 2.5)
+    moment_losses.append(_compute_metric_loss(var_actual, var_target))
     
     # Skewness loss (evaluated only when variance is stable)
     if var_actual > 1e-12:
         skew_actual, skew_target = obtained_moments[2], target_moments[2]
-        
-        if skew_actual < 1e-6 and skew_target < 1e-6:
-            moment_losses.append(0)
-        else:
-            skew_actual_abs = abs(skew_actual)
-            skew_target_abs = abs(skew_target)
-            skew_scale = min(skew_actual_abs, skew_target_abs) if min(skew_actual_abs, skew_target_abs) > 1e-6 else max(skew_actual_abs, skew_target_abs) / 2
-
-            skew_err = abs(skew_actual - skew_target) / skew_scale
-            moment_losses.append(np.log1p(skew_err) ** 2.5)
+        moment_losses.append(_compute_metric_loss(skew_actual, skew_target))
         
     # Kurtosis loss
     kurt_actual, kurt_target = obtained_moments[3], target_moments[3]
-    kurt_scale = min(abs(kurt_actual), abs(kurt_target)) + 1e-6
-    kurt_err = abs(kurt_actual - kurt_target) / kurt_scale
-    moment_losses.append(np.log1p(kurt_err) ** 2.5)
+    moment_losses.append(_compute_metric_loss(kurt_actual, kurt_target))
     
     if not moment_losses: return 0.0
         

@@ -27,9 +27,9 @@ from notebooks.visualization_utils import plot_graph, plot_annd
 
 
 # Cell 1 - Global Variables & Data Loading
-DATASET = "MUTAG"
+DATASET = "BZR"
 METHOD = "anndg"  # Options: "padma", "anndg", etc.
-IDX = 0
+IDX = 330
 
 try:
     dataset = DatasetPT(PROJECT_ROOT / "data" / DATASET / f"{DATASET}_original.pt")
@@ -56,7 +56,7 @@ plt.show()
 
 # Cell 3 - Synthetic Graph Generation (PADMA)
 # Generate synthetic graph
-rng = np.random.default_rng(seed=42)
+rng = np.random.default_rng(seed=749995526)
 GRAPH_SYNTH_NX = generate_graph(target_stats, method=METHOD, rng=rng)
 GRAPH_SYNTH_IG = networkx_to_igraph(GRAPH_SYNTH_NX)
 
@@ -72,27 +72,39 @@ obtained_stats = analyze_single_graph(GRAPH_SYNTH_IG)
 plt.tight_layout()
 plt.show()
 
-print("\n" + "="*30)
-print("STRUCTURAL ERROR ANALYSIS")
-print("="*30)
+print(f"\n" + "="*70)
+print(f"{'TOPOLOGICAL STATISTIC':<25} | {'ORIGINAL':<12} | {'SYNTHETIC':<12} | {'DELTA':<10}")
+print("-" * 70)
 
-# Calculate ANND and degree sequences for both graphs
+# Scalar metrics comparison
+scalar_metrics = ['assortativity', 'modularity', 'clustering', 'efficiency', 'diameter']
+for m in scalar_metrics:
+    orig = target_stats.get(m, 0.0)
+    synth = obtained_stats.get(m, 0.0)
+    delta = abs(orig - synth)
+    print(f"{m.capitalize():<25} | {orig:>12.4f} | {synth:>12.4f} | {delta:>10.4f}")
+
+print("-" * 70)
+
+# Structural error computation
+from src.graph_analysis import calculate_moments_error
+
+# Calculate degree sequences for ANND error
 deg_seq_original = np.array(GRAPH_IG.degree())
 deg_seq_synthetic = np.array(GRAPH_SYNTH_IG.degree())
 
-# Compute the structural error between the ANND of the synthetic and original graphs
 annd_error = calculate_annd_error(
     obtained_annd=obtained_stats['annd'], 
     obtained_degree_sequence=deg_seq_synthetic, 
     target_annd=target_stats['annd'], 
     target_degree_sequence=deg_seq_original
 )
+moments_error = calculate_moments_error(target_stats['normalized_degree_moments'], obtained_stats['normalized_degree_moments'])
+diameter_error = abs(obtained_stats['diameter'] - target_stats['diameter']) / target_stats['diameter'] if target_stats['diameter'] > 0 else 0.0
 
-print(f"ANND Structural Error (Synthetic vs {METHOD.capitalize()}): {annd_error:.4f}")
-print(f"Original Assortativity:  {target_stats['assortativity']:.4f}")
-print(f"Synthetic Assortativity: {obtained_stats['assortativity']:.4f}")
-print(f"Original ANND: {target_stats['annd']}")
-print(f"Synthetic ANND: {obtained_stats['annd']}")
-print(f"Original Degree Moments: {target_stats['normalized_degree_moments']}")
-print(f"Synthetic Degree Moments: {obtained_stats['normalized_degree_moments']}")
-print("="*30)
+print(f"\n{'STRUCTURAL ERROR SUMMARY':<25} | {'VALUE':<12}")
+print("-" * 40)
+print(f"{'Moments Error':<25} | {moments_error:>12.4f}")
+print(f"{'ANND Error':<25} | {annd_error:>12.4f}")
+print(f"{'Diameter Error':<25} | {diameter_error:>12.4f}")
+print("="*70 + "\n")

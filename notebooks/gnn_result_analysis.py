@@ -62,20 +62,57 @@ def get_degree_sequence(dataset_path: str | Path, idx: int) -> np.ndarray | None
     return None
 
 
-
 # Cell 1 - Global Variables & Data Loading
 RESULTS_DIR = PROJECT_ROOT / "results"
 DATASET_NAMES = [
-        "BZR", "DHFR", "Mutagenicity", "MUTAG",
+        "BZR", "DHFR", "Mutagenicity", "MUTAG", #"AIDS", "IMDB-BINARY", "NCI1", "PROTEINS"
+        # "MUTAG"
     ]
-BASE_METHOD_ORDER = ["dummyNodes", "dummyEdges", "padma", "pdd", "ergm"]
+BASE_METHOD_ORDER = ["dummyNodes", "dummyEdges", "padma", "anndg"]
 PALETTE = {
     "original": "#5B9BD5", 
     "padma": "#F5C431", 
-    "pdd": "#E06C75",
-    "ergm": "#5CE9FF", 
+    "anndg": "#E06C75",
+    "pdd": "#5CE9FF", 
     "dummyEdges": "#98C379", 
     "dummyNodes": "#DA7CF7"}
+
+def verify_original_consistency(df: pd.DataFrame):
+    """Verifies that statistics for 'original' graphs are identical across all loaded sources.
+    
+    Raises:
+        ValueError: If a discrepancy is found for any metric in any original graph.
+    """
+    metrics = ["modularity", "clustering", "assortativity", "efficiency", "diameter", "normalized_degree_moments", "annd"]
+    metrics = [m for m in metrics if m in df.columns]
+    
+    for (ds, g_idx), grp in df.groupby(["dataset", "graph_idx"]):
+        if len(grp) <= 1:
+            continue
+        
+        for metric in metrics:
+            vals = grp[metric].values
+            
+            # Handle NumPy arrays (moments, annd)
+            if isinstance(vals[0], np.ndarray):
+                first = vals[0]
+                for i, other in enumerate(vals[1:]):
+                    # Check shape and content equality
+                    if first.shape != other.shape or not np.array_equal(first, other):
+                        raise ValueError(
+                            f"CONSISTENCY ERROR: Original graph {g_idx} in dataset '{ds}' has conflicting "
+                            f"values for '{metric}' across source files.\n"
+                            f"First encounter: {first}\nConflict found: {other}"
+                        )
+            # Handle scalars
+            else:
+                # Use allclose for floats to handle precision noise, but keep atol very small
+                if not np.allclose(vals, vals[0], atol=1e-8, equal_nan=True):
+                    raise ValueError(
+                        f"CONSISTENCY ERROR: Original graph {g_idx} in dataset '{ds}' has conflicting "
+                        f"values for '{metric}' across source files.\n"
+                        f"Values found: {vals.tolist()}"
+                    )
 
 def load_experiment_data() -> Tuple[pd.DataFrame, pd.DataFrame]:
     """Loads and preprocesses main GNN evaluation data and per-graph statistics."""
@@ -121,21 +158,24 @@ def load_experiment_data() -> Tuple[pd.DataFrame, pd.DataFrame]:
         for df_target in [df_raw, df_pg_raw]:
             if "normalized_degree_moments" in df_target.columns:
                 df_target["normalized_degree_moments"] = df_target["normalized_degree_moments"].apply(parse_array)
+            if "annd" in df_target.columns:
+                df_target["annd"] = df_target["annd"].apply(parse_array)
                 # Unpack into individual deg_moment_X columns
                 for i in range(4):
                     df_target[f"deg_moment_{i+1}"] = df_target["normalized_degree_moments"].apply(lambda x: x[i] if len(x)>i else 0.0)
-            
-            if "annd" in df_target.columns:
-                df_target["annd"] = df_target["annd"].apply(parse_array)
 
         # Compute moments_error for df_pg_raw by matching (dataset, graph_idx)
         if not df_pg_raw.empty:
             original_df = df_pg_raw[df_pg_raw["source"] == "original"]
             
+            # --- Consistency Check ---
+            verify_original_consistency(original_df)
+            
             # Map target moments by (dataset, graph_idx)
             # Use groupby to handle potential duplicate entries if identical splits overlap
             target_moments_dict = {}
             target_annd_dict = {}
+            target_diameter_dict = {}
             for (d_name, g_idx), grp in original_df.groupby(["dataset", "graph_idx"]):
                 
                 valid_moments_arrays = [x for x in grp["normalized_degree_moments"].values if len(x) == 4]
@@ -153,6 +193,8 @@ def load_experiment_data() -> Tuple[pd.DataFrame, pd.DataFrame]:
                     with np.errstate(divide='ignore', invalid='ignore'):
                         mean_vec = np.nanmean(padded, axis=0)
                     target_annd_dict[(d_name, g_idx)] = np.nan_to_num(mean_vec, nan=0.0)
+
+                target_diameter_dict[(d_name, g_idx)] = grp["diameter"].mean()
             
             def compute_moments_error(row):
                 ds = row["dataset"]
@@ -163,6 +205,7 @@ def load_experiment_data() -> Tuple[pd.DataFrame, pd.DataFrame]:
                 if target is None: return np.nan
                 
                 actual = row["normalized_degree_moments"]
+
                 return calculate_moments_error(actual, target)
 
             def compute_annd_error(row):
@@ -196,9 +239,22 @@ def load_experiment_data() -> Tuple[pd.DataFrame, pd.DataFrame]:
                     return np.nan
                 
                 return calculate_annd_error(a_annd, a_deg_seq, t_annd, t_deg_seq)
+            
+            def compute_diameter_error(row):
+                ds = row["dataset"]
+                g_idx = row.get("graph_idx", None)
+                if g_idx is None: return np.nan
+                
+                target = target_diameter_dict.get((ds, g_idx))
+                if target is None: return np.nan
+                
+                actual = row["diameter"]
+
+                return abs(actual - target) / target
                 
             df_pg_raw["moments_error"] = df_pg_raw.apply(compute_moments_error, axis=1)
             df_pg_raw["annd_error"] = df_pg_raw.apply(compute_annd_error, axis=1)
+            df_pg_raw["diameter_error"] = df_pg_raw.apply(compute_diameter_error, axis=1)
     else:
         df_pg_raw = pd.DataFrame()
 
@@ -225,12 +281,12 @@ def compute_radar_bounds(df_pg_ds: pd.DataFrame, avg_v: float, avg_e: float) -> 
     Returns:
         A dictionary mapping each metric to its safe (min, max) boundaries.
     """
-    bounds: dict[str, tuple[float, float]] = {"modularity": (-0.5, 1.0), "clustering": (0.0, 1.0), "assortativity": (-1.0, 1.0), "efficiency": (0.0, 1.0), "moments_error": (0.0, 1.0), "annd_error": (0.0, 1.0)}
+    bounds: dict[str, tuple[float, float]] = {"modularity": (-0.5, 1.0), "clustering": (0.0, 1.0), "assortativity": (-1.0, 1.0), "efficiency": (0.0, 1.0), "moments_error": (0.0, 1.0), "annd_error": (0.0, 1.0), "diameter_error": (0.0, 1.0)}
         
     global_90 = df_pg_ds.quantile(0.9, numeric_only=True)
     global_min = df_pg_ds.min(numeric_only=True)
     
-        # Moments 1 & 2: Bound at 0 and max empirical
+    # Moments 1 & 2: Bound at 0 and max empirical
     bounds["deg_moment_1"] = (0.0, float(global_90.get("deg_moment_1", 1.0)))
     bounds["deg_moment_2"] = (0.0, float(global_90.get("deg_moment_2", 1.0)))
     
@@ -242,6 +298,10 @@ def compute_radar_bounds(df_pg_ds: pd.DataFrame, avg_v: float, avg_e: float) -> 
     # Moment 4 (Kurtosis): Minimum theoretical is 1. Prevent zoom up to 10.
     m4_max = max(5.0, float(global_90.get("deg_moment_4", 0.0)))
     bounds["deg_moment_4"] = (1.0, m4_max)
+
+    # Diameter:
+    diam_max = float(global_90.get("diameter", 0.0))
+    bounds["diameter"] = (1.0, diam_max)
 
     # Motifs: Use 90th percentile to avoid outlier-driven scaling
     for i in range(1, 9):
@@ -262,10 +322,10 @@ def plot_performance_trajectory(df: pd.DataFrame, df_pg: pd.DataFrame, dataset: 
 
     if df_dataset.empty or df_pg_ds.empty or not methods: return
 
-    topo_metrics = ["modularity", "clustering", "assortativity", "efficiency", "moments_error", "annd_error"]
+    topo_metrics = ["modularity", "clustering", "assortativity", "efficiency", "moments_error", "annd_error", "diameter_error"]
     moment_metrics = [f"deg_moment_{i}" for i in range(1, 5)]
     motif_metrics = [f"motif_count_{i}" for i in range(1, 9)] if analyze_motifs else []
-    all_metrics = topo_metrics + moment_metrics + motif_metrics
+    all_metrics = topo_metrics + moment_metrics + ["diameter"] + motif_metrics
     
     # Aggregate raw metrics by (method, variant, label) using the mean.
     df_agg_raw = df_pg_ds.groupby(["source_base", "source", "label"], observed=True)[all_metrics].mean().reset_index()
@@ -299,7 +359,7 @@ def plot_performance_trajectory(df: pd.DataFrame, df_pg: pd.DataFrame, dataset: 
 
     angles = np.linspace(0, 2 * np.pi, len(all_metrics), endpoint=False).tolist()
     angles += angles[:1]
-    metric_labels = ["Mod", "Clust", "Assort", "Eff", "MErr", "AErr"] + [f"M{i}" for i in range(1, 5)]
+    metric_labels = ["Mod", "Clust", "Assort", "Eff", "MErr", "AErr", "DErr"] + [f"M{i}" for i in range(1, 5)] + ["Diam"]
     if analyze_motifs:
         metric_labels += [f"Motif{i}" for i in range(1, 9)]
 
@@ -407,8 +467,9 @@ def plot_performance_trajectory(df: pd.DataFrame, df_pg: pd.DataFrame, dataset: 
 
     # Display Normalization Bounds
     df_bounds = pd.DataFrame(norm_bounds, index=["Min Bound", "Max Bound"])
-    clean_cols = {"modularity": "Mod", "clustering": "Clust", "assortativity": "Assort", "efficiency": "Eff", "moments_error": "MErr", "annd_error": "AErr"}
+    clean_cols = {"modularity": "Mod", "clustering": "Clust", "assortativity": "Assort", "efficiency": "Eff", "moments_error": "MErr", "annd_error": "AErr", "diameter_error": "DErr"}
     clean_cols.update({f"deg_moment_{i}": f"M{i}" for i in range(1, 5)})
+    clean_cols.update({"diameter": "Diam"})
     
     if analyze_motifs:
         clean_cols.update({f"motif_count_{i}": f"Motif{i}" for i in range(1, 9)})
@@ -419,10 +480,10 @@ def display_detailed_statistics_table(df_pg: pd.DataFrame, dataset: str, analyze
     if df_pg_ds.empty: return
 
     acc_cols = [c for c in df_pg_ds.columns if c.startswith("mean_acc_")]
-    topo_cols = [c for c in df_pg_ds.columns if c in ["modularity", "clustering", "assortativity", "efficiency", "moments_error", "annd_error"]]
+    topo_cols = [c for c in df_pg_ds.columns if c in ["modularity", "clustering", "assortativity", "efficiency", "moments_error", "annd_error", "diameter_error"]]
     moment_cols = [c for c in df_pg_ds.columns if c.startswith("deg_moment_")]
     motif_cols = [c for c in df_pg_ds.columns if c.startswith("motif_count_")] if analyze_motifs else []
-    all_metrics = acc_cols + topo_cols + moment_cols + motif_cols
+    all_metrics = acc_cols + topo_cols + moment_cols + ["diameter"] + motif_cols
 
     # Group by source, split, AND label (class)
     df_agg = df_pg_ds.groupby(["source", "split", "label"], observed=True)[all_metrics].mean()
@@ -435,7 +496,7 @@ def display_detailed_statistics_table(df_pg: pd.DataFrame, dataset: str, analyze
         if cl in acc_cols:
             cat_mapping[cl], clean_names[cl] = "Accuracy", cl.replace("mean_acc_", "").upper()
         elif cl in topo_cols:
-            cat_mapping[cl], clean_names[cl] = "Topology", "MErr" if cl == "moments_error" else "AErr" if cl == "annd_error" else cl.capitalize()
+            cat_mapping[cl], clean_names[cl] = "Topology", "MErr" if cl == "moments_error" else "AErr" if cl == "annd_error" else "DErr" if cl == "diameter_error" else cl.capitalize()
         elif cl in moment_cols:
             cat_mapping[cl], clean_names[cl] = "Moments", cl.replace("deg_moment_", "M")
         else:
@@ -491,22 +552,35 @@ def display_detailed_statistics_table(df_pg: pd.DataFrame, dataset: str, analyze
 
     display(_styler(df_final.style))
 
-for ds in DATASETS:
-    plot_performance_trajectory(df_raw, df_pg_raw, ds, qq_metric="moments_error", variants_idx=[1, 2, 3, 4, 5], analyze_motifs=False)
-
-    # --- Debugging high MErr (moments_error) graphs ---
-    df_ds = df_pg_raw[df_pg_raw["dataset"] == ds]
-    df_ds = df_ds[df_ds["method"] == "anndg"]
-    if not df_ds.empty and "moments_error" in df_ds.columns:
-        median_err = df_ds["moments_error"].median()
+def debug_high_error(df_pg, ds_name, error_name="moments_error"):
+    """Identifies and displays graphs with error metrics significantly higher than the median."""
+    df_ds = df_pg[(df_pg["dataset"] == ds_name) & (df_pg["source_base"] == "anndg")]
+    
+    if not df_ds.empty and error_name in df_ds.columns:
+        median_err = df_ds[error_name].median()
         # Heuristic: > 5.0 absolute or > 10x median
         threshold = max(5.0, median_err * 10) 
         
-        outliers = df_ds[df_ds["moments_error"] > threshold].sort_values("moments_error", ascending=False)
+        outliers = df_ds[df_ds[error_name] > threshold].sort_values(error_name, ascending=False)
+        
+        # Columns to display for context
+        cols = ["source", "graph_idx", "label", error_name, "deg_moment_1", "deg_moment_2", "deg_moment_3", "deg_moment_4"]
+        cols = [c for c in cols if c in df_ds.columns]
+        
         if not outliers.empty:
-            print(f"\n[DEBUG] Abnormal MErr detected in dataset: {ds} (Threshold: {threshold:.2f})")
-            display(outliers[["source", "graph_idx", "label", "moments_error"]].head(10))
+            print(f"\n[DEBUG] Abnormal {error_name} detected in dataset: {ds_name} (Threshold: {threshold:.2f})")
+            display(outliers[cols].head(5))
+        else:
+            print(f"\n[DEBUG] No abnormal {error_name} detected in dataset: {ds_name} (Threshold: {threshold:.2f})")
+            # Show worst cases regardless of threshold if no outliers are found
+            worst = df_ds.sort_values(error_name, ascending=False)
+            display(worst[cols].head(5))
 
+
+for ds in DATASETS:
+    plot_performance_trajectory(df_raw, df_pg_raw, ds, qq_metric="moments_error", variants_idx=[1, 2, 3, 4, 5], analyze_motifs=False)
+
+    debug_high_error(df_pg_raw, ds, "moments_error")
     # display_detailed_statistics_table(df_pg_raw, ds, analyze_motifs=True)
 
 
@@ -592,10 +666,10 @@ def _compute_aggregated_summary_df(df: pd.DataFrame, df_synth: pd.DataFrame, df_
     f1_agg = df.groupby(["dataset", "source_base", "model"], observed=True)["test_f1"].agg(["mean", "std"])
     delta_agg = df_synth.groupby(["dataset", "source_base", "model"], observed=True)["delta_test_f1"].agg(["mean", "std"])
     
-    topo_base = ["modularity", "clustering", "assortativity", "efficiency", "moments_error", "annd_error"]
+    topo_base = ["modularity", "clustering", "assortativity", "efficiency", "moments_error", "annd_error", "diameter_error"]
     moment_metrics = sorted([c for c in df_pg.columns if c.startswith("deg_moment_")])
     motif_metrics = sorted([c for c in df_pg.columns if c.startswith("motif_count_")]) if analyze_motifs else []
-    all_topo = topo_base + moment_metrics + motif_metrics
+    all_topo = topo_base + moment_metrics + ["diameter"] + motif_metrics
     topo_agg = df_pg.groupby(["dataset", "source_base"], observed=True)[all_topo].agg(["mean", "std"])
     
     all_methods = df["source_base"].cat.categories.tolist()
@@ -603,8 +677,9 @@ def _compute_aggregated_summary_df(df: pd.DataFrame, df_synth: pd.DataFrame, df_
     c_tuples = []
     for model in MODELS: c_tuples.append(("F1-Score", model))
     for model in MODELS: c_tuples.append(("|Δ F1|", model))
-    for m in topo_base: c_tuples.append(("Topology", "MErr" if m == "moments_error" else "AErr" if m == "annd_error" else m.capitalize()))
+    for m in topo_base: c_tuples.append(("Topology", "MErr" if m == "moments_error" else "AErr" if m == "annd_error" else "DErr" if m == "diameter_error" else m.capitalize()))
     for m in moment_metrics: c_tuples.append(("Moments", m.replace("deg_moment_", "M")))
+    c_tuples.append(("Topology", "Diam"))
     if analyze_motifs:
         for m in motif_metrics: c_tuples.append(("Motifs", m.replace("motif_count_", "")))
     
@@ -745,4 +820,4 @@ def plot_final_results_comparison(df_synth: pd.DataFrame, df_pg: pd.DataFrame, a
     plt.show()
 
 # Run final summary analysis
-plot_final_results_comparison(df_synth, df_pg_raw, analyze_metric="assortativity")
+plot_final_results_comparison(df_synth, df_pg_raw, analyze_metric="moments_error")

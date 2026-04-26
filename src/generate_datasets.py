@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 KNOWN_METHODS: frozenset[str] = frozenset({"padma", "pdd", "ergm", "dummyEdges", "dummyNodes", "anndg"})
 
 
-def generate_graph(target_stats: dict[str, Any], method: str, rng: np.random.Generator) -> nx.Graph:
+def generate_graph(target_stats: dict[str, Any], method: str, rng: np.random.Generator = None) -> nx.Graph:
     """Generates a graph using method.
 
     Args:
@@ -41,6 +41,9 @@ def generate_graph(target_stats: dict[str, Any], method: str, rng: np.random.Gen
     Raises:
         ValueError: If the method is not supported or required data is missing.
     """
+    if rng is None:
+        rng = np.random.default_rng()
+
     if method == "padma":
         G_nx, _ = padma_generate_graph(target_stats, rng)
         return G_nx

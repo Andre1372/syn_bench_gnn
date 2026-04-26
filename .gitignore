@@ -14,3 +14,4 @@ synthetic_data/
 # Files
 NOTES.md
 nohup.out
+*.log

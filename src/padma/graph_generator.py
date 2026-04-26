@@ -208,7 +208,7 @@ def _generate_degree_sequence(
 # Public API
 # ---------------------------------------------------------------------------
 
-def generate_graph(target_stats: dict[str, Any], rng: np.random.Generator, normalize_by_size: bool = True, debug: bool = False) -> tuple[nx.Graph, dict]:
+def generate_graph(target_stats: dict[str, Any], rng: np.random.Generator = None, normalize_by_size: bool = True, debug: bool = False) -> tuple[nx.Graph, dict]:
     """Generate a synthetic graph matching the target statistics.
 
     Pipeline:
@@ -228,6 +228,9 @@ def generate_graph(target_stats: dict[str, Any], rng: np.random.Generator, norma
     Returns:
         A tuple (G_syn, info).
     """
+    if rng is None:
+        rng = np.random.default_rng()
+
     n = target_stats["n_nodes"]
     if n < 2: raise ValueError(f"Graph must have at least 2 nodes, got {n}.")
 
