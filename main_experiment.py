@@ -62,7 +62,7 @@ def parse_arguments() -> argparse.Namespace:
         "--num_synth_datasets",
         "-V",
         type=int,
-        default=10,
+        default=20,
         help="Number of independent synthetic variants V to generate per (dataset, method) pair.",
     )
 
@@ -82,7 +82,7 @@ def parse_arguments() -> argparse.Namespace:
         "--gnn_runs",
         "-R",
         type=int,
-        default=5,
+        default=10,
         help="Number of independent GNN training runs per dataset for variance estimation.",
     )
     parser.add_argument(

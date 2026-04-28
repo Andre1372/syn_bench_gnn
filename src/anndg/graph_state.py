@@ -3,6 +3,7 @@
 from dataclasses import dataclass
 import numpy as np
 import igraph as ig
+from collections import deque
 
 
 @dataclass(frozen=True)
@@ -61,6 +62,66 @@ class GraphState:
     def num_edges(self) -> int:
         """Returns the current number of edges in the graph."""
         return self._num_edges
+    
+    @property
+    def exact_diameter(self) -> int:
+        """
+        Returns the exact diameter of the graph using igraph.
+        For disconnected graphs, returns the diameter of the largest connected component.
+        """
+        if self._num_nodes <= 1 or self._num_edges == 0:
+            return 0
+        d = self.get_graph().diameter(directed=False)
+        # Avoid inf if possible, though igraph usually returns max component diameter
+        return int(d) if d != float('inf') else 0
+
+    @property
+    def approximate_diameter(self) -> int:
+        """
+        Returns the approximate diameter of the graph using a two-sweep BFS.
+        This provides a lower bound and is exact for trees. For general graphs, 
+        it is highly efficient but may under-estimate the true diameter by a small margin.
+        """
+        if self._num_nodes <= 1 or self._num_edges == 0:
+            return 0
+        
+        visited_global = [False] * self._num_nodes
+        max_diam = 0
+        
+        def bfs_furthest(start_node: int) -> tuple[int, int]:
+            distances = [-1] * self._num_nodes
+            distances[start_node] = 0
+            queue = deque([start_node])
+            furthest_node = start_node
+            max_dist = 0
+            
+            while queue:
+                curr = queue.popleft()
+                visited_global[curr] = True
+                curr_dist = distances[curr]
+                
+                for neighbor in self._adj_list[curr]:
+                    if distances[neighbor] == -1:
+                        d = curr_dist + 1
+                        distances[neighbor] = d
+                        queue.append(neighbor)
+                        if d > max_dist:
+                            max_dist = d
+                            furthest_node = neighbor
+                            
+            return furthest_node, max_dist
+
+        for i in range(self._num_nodes):
+            if not visited_global[i]:
+                # 1st sweep: find a peripheral node
+                u, _ = bfs_furthest(i)
+                # 2nd sweep: find the distance from that peripheral node
+                _, comp_diam = bfs_furthest(u)
+                
+                if comp_diam > max_diam:
+                    max_diam = comp_diam
+                    
+        return max_diam
 
     def has_edge(self, u: int, v: int) -> bool:
         """Checks if an edge exists between two nodes."""
@@ -122,6 +183,7 @@ class GraphState:
         new_state._adj_list = [set(adj) for adj in self._adj_list]
         new_state._edges = list(self._edges)
         new_state._edge_to_idx = dict(self._edge_to_idx)
+        new_state._degrees = self._degrees.copy()
         return new_state
 
     def apply_change(self, change: GraphChange) -> None:
@@ -153,7 +215,7 @@ class GraphState:
             edge = (u, v) if u < v else (v, u)
             self._edge_to_idx[edge] = len(self._edges)
             self._edges.append(edge)
-
+            
         for u, v in change.edges_to_remove:
             self._adj_list[u].remove(v)
             self._adj_list[v].remove(u)

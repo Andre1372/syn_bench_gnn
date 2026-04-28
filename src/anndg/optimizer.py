@@ -6,6 +6,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 from src.anndg.graph_state import GraphState, GraphChange
+from src.graph_analysis import calculate_degree_assortativity
 
 
 def _get_binned_degree_distribution(degrees: np.ndarray, bins: int) -> np.ndarray:
@@ -23,23 +24,37 @@ def _get_binned_degree_distribution(degrees: np.ndarray, bins: int) -> np.ndarra
     
     # Sort degrees and partition into percentile bins
     sorted_degrees = np.sort(degrees)
-    return np.array([
+
+    degree_distribution = np.array([
         group.mean() if group.size > 0 else 0.0 
         for group in np.array_split(sorted_degrees, bins)
     ], dtype=float)
 
+    degree_distribution = degree_distribution / degree_distribution.sum() 
 
-def _compute_objective(actual_annd: np.ndarray, target_annd: np.ndarray, weights: np.ndarray) -> float:
-    """
-    Computes a weighted Log-Cosh objective function between actual and target ANND.
-    """
-    # [OBSOLETE] Weighted L2 implementation:
-    # diff = actual_annd - target_annd
-    # error = np.sqrt(np.dot(weights, diff * diff))
-    # return float(error)
+    return degree_distribution
 
-    # # Advanced Log-Cosh implementation: sum(w_i * log(cosh(10 * delta_i)))
-    # # We use a numerically stable identity: log(cosh(x)) = |x| - log(2) + log(1 + exp(-2|x|))
+
+def _compute_annd_objective(actual_annd: np.ndarray, target_annd: np.ndarray, weights: np.ndarray) -> float:
+    """
+    Calculates the weighted Log-Cosh loss between actual and target ANND profiles.
+
+    The Log-Cosh objective function serves as a smooth, robust alternative to 
+    Mean Squared Error (MSE).
+
+    Formula:
+        loss = Σ w_i * log(cosh(10 * (actual_i - target_i)))
+
+    Numerical stability is ensured via the identity: 
+        log(cosh(x)) = |x| - log(2) + log(1 + exp(-2|x|)).
+
+    Args:
+        actual_annd: Array of current ANND values.
+        target_annd: Array of target ANND values.
+        weights: Weighting coefficients, usually representing the degree distribution bin sizes.
+    Returns:
+        float: The total weighted objective value.
+    """
     x = 10.0 * (actual_annd - target_annd)
     log_cosh = np.abs(x) - np.log(2.0) + np.log1p(np.exp(-2.0 * np.abs(x)))
     error = np.dot(weights, log_cosh)
@@ -47,7 +62,12 @@ def _compute_objective(actual_annd: np.ndarray, target_annd: np.ndarray, weights
     return float(error)
 
 
-def _propose_change(graph_state: GraphState, rng: np.random.Generator) -> GraphChange | None:
+def _compute_diameter_objective(actual_diameter: float, target_diameter: float) -> float:
+    """Calculates the relative error between actual and target diameter."""
+    return abs(actual_diameter - target_diameter) / target_diameter
+
+
+def _propose_double_edge_swap(graph_state: GraphState, rng: np.random.Generator) -> GraphChange | None:
     """Propose a random degree-preserving double edge swap."""
     if graph_state.num_edges < 2:
         return None
@@ -82,9 +102,10 @@ def _propose_change(graph_state: GraphState, rng: np.random.Generator) -> GraphC
 def optimizer(
     initial_graph: ig.Graph, 
     target_annd: np.ndarray, 
+    target_diameter: float | None = None,
     rng: np.random.Generator | None = None, 
     debug: bool = False
-) -> GraphState:
+) -> tuple[GraphState, float]:
     """
     Optimizes a graph's ANND (Average Nearest Neighbor Degree) to match a target vector.
 
@@ -94,15 +115,18 @@ def optimizer(
         rng: The random number generator instance.
         debug: Whether to print optimization progress and plot errors.
     Returns:
-        The optimized `GraphState` exhibiting the best discovered ANND configuration.
+        The optimized `GraphState` exhibiting the best discovered ANND configuration and the final error.
     """
     rng = rng or np.random.default_rng()
     target_annd = np.asarray(target_annd, dtype=float)
+    if debug:
+        target_assortativity = calculate_degree_assortativity(initial_graph)
     bins = len(target_annd)
 
     # Initialize graph state
     graph_state = GraphState(initial_graph)
     initial_annd = graph_state.get_annd(bins=bins)
+    initial_diameter = graph_state.exact_diameter if target_diameter is not None else None
     
     # Compute binned degree distribution for weighting (matches the binning in get_annd)
     degree_distribution = _get_binned_degree_distribution(graph_state._degrees, bins=bins)
@@ -112,47 +136,66 @@ def optimizer(
         print(f"{'Initial ANND:':<40} {initial_annd}")
         print(f"{'Target ANND:':<40} {target_annd}")
 
-    # Track metrics
-    current_error = _compute_objective(initial_annd, target_annd, weights=degree_distribution)
-    best_error = current_error
-    best_state = graph_state.copy()
-    
-    errors_history = [current_error] if debug else []
-
-    if debug:
-        print(f"{'Initial ANND error:':<40} {current_error:.6f}")
-
     # Optimization loop parameters
     max_steps = 10000
     patience = 500
     steps_without_improvement = 0
     temperature = 1.0
     cooling = 10**(-3/max_steps) #0.998
+
+    # Track metrics
+    current_error = _compute_annd_objective(initial_annd, target_annd, weights=degree_distribution)
+    if target_diameter is not None:
+        current_error = 0.9 * current_error + 0.1 * _compute_diameter_objective(initial_diameter, target_diameter)
+    
+    errors_history = [current_error] if debug else []
+    assortativity_errors_history = []
+    
+    if debug and target_assortativity is not None:
+        initial_assortativity = calculate_degree_assortativity(graph_state.get_graph())
+        assortativity_errors_history.append(abs(initial_assortativity - target_assortativity))
+    if debug:
+        print(f"{'Initial ANND error:':<40} {current_error:.6f}")
+
+    best_state = {
+        "error": current_error,
+        "graph_state": graph_state.copy(),
+        "temperature": temperature,
+        "step": 0,
+        }
+    reset_allowed = True
     
     # Main loop
     for step in range(max_steps):
-        change = _propose_change(graph_state, rng)
+        change = _propose_double_edge_swap(graph_state, rng)
         steps_without_improvement += 1
         
         # State transitions without proposals skip evaluations
         if change is None: 
-            if debug: errors_history.append(current_error)
+            if debug: 
+                errors_history.append(current_error)
+                assortativity_errors_history.append(assortativity_errors_history[-1])
             if steps_without_improvement >= patience:
-                if debug: print(f"Early stopping at step {step + 1} - Best error: {best_error:.6f}")
+                if debug: print(f"Early stopping at step {step + 1} - Best error: {best_state['error']:.6f} at step {best_state['step']}")
                 break
             continue
 
         # Propose state change
         graph_state.apply_change(change)
-        proposed_error = _compute_objective(graph_state.get_annd(bins=bins), target_annd, weights=degree_distribution)
+        proposed_error = _compute_annd_objective(graph_state.get_annd(bins=bins), target_annd, weights=degree_distribution)
+        if target_diameter is not None:
+            proposed_error = 0.9 * proposed_error + 0.1 * _compute_diameter_objective(graph_state.exact_diameter, target_diameter)
         
-        if rng.random() < np.exp((best_error - proposed_error) / temperature):
+        if rng.random() < np.exp((best_state['error'] - proposed_error) / temperature):
             # accept
             current_error = proposed_error
-            if current_error < best_error:
-                best_error = current_error
-                best_state = graph_state.copy()
+            if current_error < best_state['error']:
+                best_state['error'] = current_error
+                best_state['graph_state'] = graph_state.copy()
+                best_state['temperature'] = temperature
+                best_state['step'] = step
                 steps_without_improvement = 0
+                reset_allowed = True
         else:
             # reject
             graph_state.revert_change(change)
@@ -162,23 +205,46 @@ def optimizer(
         
         if debug:
             errors_history.append(current_error)
-            if (step + 1) % 100 == 0:
-                print(f"Step {step + 1}/{max_steps} - Best error: {best_error:.6f}")
+            current_assortativity = calculate_degree_assortativity(graph_state.get_graph())
+            assortativity_errors_history.append(abs(current_assortativity - target_assortativity))
                 
         if steps_without_improvement >= patience:
-            if debug: print(f"Early stopping at step {step + 1} - Best error: {best_error:.6f}")
+            if debug: print(f"Early stopping at step {step + 1} - Best error: {best_state['error']:.6f} at step {best_state['step']}")
             break
+
+        if steps_without_improvement >= patience * 0.75 and reset_allowed:
+            graph_state = best_state['graph_state'].copy()
+            temperature = min(1.0, best_state['temperature'] * 1.15)
+            current_error = best_state['error']
+            reset_allowed = False
         
     if debug:
-        print(f"{'Final ANND error:':<40} {best_error:.6f}")
+        print(f"{'Final ANND error:':<40} {best_state['error']:.6f}")
     
         # Plot optimization trajectory
-        plt.figure(figsize=(10, 6))
-        plt.plot(errors_history, color='#2563eb', linewidth=1.5)
+        fig, ax1 = plt.subplots(figsize=(10, 6))
+        
+        ax1.plot(errors_history, color='#2563eb', linewidth=1.5, label='Objective Function')
+        ax1.set_xlabel("MCMC Step", fontsize=12)
+        ax1.set_ylabel("Total Error", fontsize=12, color='#2563eb')
+        ax1.tick_params(axis='y', labelcolor='#2563eb')
+        ax1.grid(True, linestyle='--', alpha=0.7)
+
+        if assortativity_errors_history:
+            ax2 = ax1.twinx()
+            ax2.plot(assortativity_errors_history, color='#dc2626', linewidth=1.5, label='Assortativity Error')
+            ax2.set_ylabel("Assortativity Absolute Error", fontsize=12, color='#dc2626')
+            ax2.tick_params(axis='y', labelcolor='#dc2626')
+            
+            # Combine legends
+            lines, labels = ax1.get_legend_handles_labels()
+            lines2, labels2 = ax2.get_legend_handles_labels()
+            ax1.legend(lines + lines2, labels + labels2, loc='upper right')
+        else:
+            ax1.legend(loc='upper right')
+
         plt.title("ANNDG Optimization Progress", fontsize=14, fontweight='bold')
-        plt.xlabel("MCMC Step", fontsize=12)
-        plt.ylabel("ANND Error", fontsize=12)
-        plt.grid(True, linestyle='--', alpha=0.7)
+        plt.tight_layout()
         plt.show()
 
-    return best_state
+    return best_state['graph_state'], best_state['error']

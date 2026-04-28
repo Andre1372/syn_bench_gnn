@@ -22,7 +22,7 @@ from src.anndg.graph_generator import generate_graph as anndg_generate_graph
 logger = logging.getLogger(__name__)
 
 
-KNOWN_METHODS: frozenset[str] = frozenset({"padma", "pdd", "ergm", "dummyEdges", "dummyNodes", "anndg"})
+KNOWN_METHODS: frozenset[str] = frozenset({"padma", "pdd", "ergm", "dummyEdges", "dummyNodes", "anndg", "anndgD"})
 
 
 def generate_graph(target_stats: dict[str, Any], method: str, rng: np.random.Generator = None) -> nx.Graph:
@@ -48,7 +48,10 @@ def generate_graph(target_stats: dict[str, Any], method: str, rng: np.random.Gen
         G_nx, _ = padma_generate_graph(target_stats, rng)
         return G_nx
     elif method == "anndg":
-        G_nx, _ = anndg_generate_graph(target_stats, rng)
+        G_nx, _ = anndg_generate_graph(target_stats, replicate_diameter=False, rng=rng)
+        return G_nx
+    elif method == "anndgD":
+        G_nx, _ = anndg_generate_graph(target_stats, replicate_diameter=True, rng=rng)
         return G_nx
     elif method == "pdd":
         if "observed_nx" not in target_stats: raise ValueError("Method 'pdd' requires 'observed_nx' in target_stats.")

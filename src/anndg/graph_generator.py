@@ -18,13 +18,20 @@ from src.anndg.optimizer import optimizer
 # Public API
 # ---------------------------------------------------------------------------
 
-def generate_graph(target_stats: dict[str, Any], rng: np.random.Generator=None) -> tuple[nx.Graph, dict]:
+def generate_graph(
+    target_stats: dict[str, Any], 
+    replicate_diameter: bool = False, 
+    rng: np.random.Generator = None,
+    debug: bool = False
+) -> tuple[nx.Graph, dict]:
     """
     Generate a graph using the ANNDG algorithm.
 
     Args:
         target_stats: Dictionary containing the target statistics.
+        replicate_diameter: Whether to include diameter in the objective function.
         rng: Random number generator.
+        debug: Whether to show optimization progress and plots.
     Returns:
         Tuple of (graph, info)
     """
@@ -32,7 +39,15 @@ def generate_graph(target_stats: dict[str, Any], rng: np.random.Generator=None) 
 
     nx_graph, info = padma_generate_graph(target_stats, rng)
 
-    best_state = optimizer(networkx_to_igraph(nx_graph), target_stats["annd"], rng)
+    target_diameter = target_stats["diameter"] if replicate_diameter else None    
+    best_state, best_error = optimizer(
+        networkx_to_igraph(nx_graph), 
+        target_stats["annd"], 
+        target_diameter=target_diameter, 
+        rng=rng,
+        debug=debug
+    )
+    info["best_objective"] = best_error
 
     best_graph = best_state.get_graph()
     best_graph = igraph_to_networkx(best_graph)
