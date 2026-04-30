@@ -4,6 +4,7 @@ from dataclasses import dataclass
 import numpy as np
 import igraph as ig
 from collections import deque
+from src.graph_analysis import calculate_diameter, calculate_eccentricity_moments
 
 
 @dataclass(frozen=True)
@@ -65,15 +66,13 @@ class GraphState:
     
     @property
     def exact_diameter(self) -> int:
-        """
-        Returns the exact diameter of the graph using igraph.
-        For disconnected graphs, returns the diameter of the largest connected component.
-        """
-        if self._num_nodes <= 1 or self._num_edges == 0:
-            return 0
-        d = self.get_graph().diameter(directed=False)
-        # Avoid inf if possible, though igraph usually returns max component diameter
-        return int(d) if d != float('inf') else 0
+        """Returns the exact diameter of the graph using igraph."""
+        return int(calculate_diameter(self.get_graph()))
+
+    @property
+    def ecc_moments(self) -> np.ndarray:
+        """Calculates the first 4 moments of the graph's eccentricity distribution."""
+        return calculate_eccentricity_moments(self.get_graph(), k=4)
 
     @property
     def approximate_diameter(self) -> int:

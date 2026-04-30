@@ -191,6 +191,7 @@ def plot_performance_distribution(
         palette="dark:black",
         size=4,
         jitter=0.15,
+        legend=False,
         ax=ax,
     )
 
@@ -233,6 +234,11 @@ def set_dynamic_ylim(ax: plt.Axes, data: np.ndarray | list[np.ndarray], percenti
     v_min = np.percentile(valid_data, 100 - percentile)
     v_max = np.percentile(valid_data, percentile)
     
+    # Handle zero range
+    if v_max == v_min:
+        v_min -= 0.5
+        v_max += 0.5
+
     # Apply expansion
     center = (v_max + v_min) / 2
     half_range = (v_max - v_min) / 2 * expansion

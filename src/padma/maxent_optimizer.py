@@ -107,10 +107,6 @@ def maxent_optimize_discrete(target_sum, target_var, n_samples, max_value,
             a = np.arcsinh(actual_value)
             b = np.arcsinh(target_value)
             loss = np.abs(a - b)**1.5
-
-            # scale = min(abs(actual_value), abs(target_value)) + 1e-6
-            # error = abs(actual_value - target_value) / scale
-            # loss = np.log1p(error) ** 2.5
             return loss
         
         var_loss = var_penalty_weight * _compute_metric_loss(actual_var, target_var)
@@ -284,8 +280,8 @@ def maxent_optimize_discrete(target_sum, target_var, n_samples, max_value,
     no_improve_count = 0
     penalty_threshold = 1e-4  # Early stop if penalty is negligible
     good_enough_penalty = 1e-4
-    worse_accept_prob = 0.10
-    worse_accept_scale = 0.02
+    worse_accept_prob = 0.50 # From 0.10
+    worse_accept_scale = 0.1 # From 0.02
     concentration_limit_frac = 0.70
     
     if debug:
@@ -376,6 +372,7 @@ def maxent_optimize_discrete(target_sum, target_var, n_samples, max_value,
         values_moved = 0
 
         if rng.random() < 0.50:
+            move_tag = "SPREAD"
             capacity_weights = (shifted_max_value - values[pool]).astype(float)
             many_indices = _sample_without_replacement(pool, capacity_weights, n_many, rng)
             if many_indices.size == 0:
@@ -399,6 +396,7 @@ def maxent_optimize_discrete(target_sum, target_var, n_samples, max_value,
                 new_values[one_idx] += remaining  # return what couldn't be placed
             values_moved = amount - remaining
         else:
+            move_tag = "CONCEN"
             donor_weights = values[pool].astype(float)
             many_indices = _sample_without_replacement(pool, donor_weights, n_many, rng)
             if many_indices.size == 0:
@@ -446,6 +444,8 @@ def maxent_optimize_discrete(target_sum, target_var, n_samples, max_value,
         # - high temp: be selective, prefer substantial improvements
         # - low temp: accept almost any improvement
         accept = False
+        prob_improve = -1.0
+        prob_worse = -1.0
         if delta_obj < 0:
             improve = -delta_obj
             improve_rel = improve / (abs(current_obj) + 1e-12)
@@ -469,6 +469,9 @@ def maxent_optimize_discrete(target_sum, target_var, n_samples, max_value,
             _block_worse_total += 1
             if accept:
                 _block_worse_accept += 1
+        
+        if debug:
+            print(f"      [MaxEnt] Prop: Iter {iteration:5d} | {move_tag:7s} | amt={values_moved:3d} | delta={delta_obj:+.4e} | p_norm={new_penalty_norm:.4f} | e_cost={new_entropy_cost:.4f} | acc={str(accept):5s} | prob_worse={prob_worse:.4f} | prob_improve={prob_improve:.4f}")
         
         if accept:
             values = new_values

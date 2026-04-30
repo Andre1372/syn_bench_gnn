@@ -3,6 +3,7 @@
 import argparse
 import csv
 import logging
+import multiprocessing as mp
 from pathlib import Path
 
 import numpy as np
@@ -114,6 +115,12 @@ def parse_arguments() -> argparse.Namespace:
         help="Skip Phase B (GNN evaluation).",
     )
     parser.add_argument(
+        "--num_workers",
+        type=int,
+        default=max(1, int(mp.cpu_count() * 0.9)),
+        help="Number of worker processes for parallel generation (Phase A).",
+    )
+    parser.add_argument(
         "--quick_test",
         action="store_true",
         help="Run a fast functional test (1 epoch, 1 run, small models).",
@@ -185,6 +192,7 @@ def main() -> None:
                     rng=rng,
                     project_root=project_root,
                     output_dir=output_dir,
+                    num_workers=args.num_workers,
                 )
                 logger.info(f"Done: {args.num_synth_datasets} variants saved to {output_dir}")
     else:

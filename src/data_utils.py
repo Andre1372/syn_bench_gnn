@@ -197,6 +197,7 @@ def get_target_stats(dataset_obj: DatasetPT, idx: int) -> dict[str, Any]:
             "normalized_degree_moments": pgs.get("normalized_degree_moments"),
             "annd": pgs.get("annd"),
             "diameter": pgs.get("diameter"),
+            "ecc_moments": pgs.get("ecc_moments"),
         }
     raise ValueError(f"No metadata found for graph {idx}.")
 
@@ -261,16 +262,16 @@ def preprocess_and_save_original_dataset(dataset_name: str, data_dir: Path, max_
                 d.y = torch.tensor([1 if d.y.item() in class1_labels else 0], dtype=torch.long)
         num_classes = 2
 
-    from src.graph_analysis import per_graph_statistics, aggregate_statistics_per_class
+    from src.graph_analysis import per_graph_statistics, aggregate_statistics
     orig_stats = per_graph_statistics(original_data_list, show_progress=True)
-    orig_agg_class = aggregate_statistics_per_class(original_data_list, orig_stats)
-
+    orig_agg = aggregate_statistics(orig_stats)
+    
     orig_metadata = {
         "source": "original",
         "dataset_name": dataset_name,
         "num_classes": num_classes,
         "per_graph_statistics": orig_stats,
-        "aggregate_statistics_per_class": orig_agg_class,
+        "aggregate_statistics": orig_agg,
     }
 
     save_synthetic_dataset(

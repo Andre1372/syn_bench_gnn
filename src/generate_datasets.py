@@ -1,6 +1,8 @@
 """Module for orchestrating the graph generation and evaluation experiment."""
 
 import logging
+import multiprocessing as mp
+from functools import partial
 from typing import Any
 from pathlib import Path
 
@@ -13,7 +15,7 @@ from tqdm import tqdm
 from tqdm.contrib.logging import logging_redirect_tqdm
 
 from src.data_utils import DatasetPT, preprocess_and_save_original_dataset, get_target_stats, igraph_to_pytorch, networkx_to_igraph, igraph_to_networkx, pytorch_to_igraph, save_synthetic_dataset, remove_features
-from src.graph_analysis import per_graph_statistics, aggregate_statistics_per_class
+from src.graph_analysis import per_graph_statistics, aggregate_statistics
 
 from src.padma.graph_generator import generate_graph as padma_generate_graph
 from src.ergm.graph_generator import ergm_fit_sample
@@ -22,7 +24,7 @@ from src.anndg.graph_generator import generate_graph as anndg_generate_graph
 logger = logging.getLogger(__name__)
 
 
-KNOWN_METHODS: frozenset[str] = frozenset({"padma", "pdd", "ergm", "dummyEdges", "dummyNodes", "anndg", "anndgD"})
+KNOWN_METHODS: frozenset[str] = frozenset({"padma", "pdd", "ergm", "dummyEdges", "dummyNodes", "anndg", "anndgD", "anndgE", "anndgED"})
 
 
 def generate_graph(target_stats: dict[str, Any], method: str, rng: np.random.Generator = None) -> nx.Graph:
@@ -48,10 +50,16 @@ def generate_graph(target_stats: dict[str, Any], method: str, rng: np.random.Gen
         G_nx, _ = padma_generate_graph(target_stats, rng)
         return G_nx
     elif method == "anndg":
-        G_nx, _ = anndg_generate_graph(target_stats, replicate_diameter=False, rng=rng)
+        G_nx, _ = anndg_generate_graph(target_stats, rng=rng)
         return G_nx
     elif method == "anndgD":
         G_nx, _ = anndg_generate_graph(target_stats, replicate_diameter=True, rng=rng)
+        return G_nx
+    elif method == "anndgE":
+        G_nx, _ = anndg_generate_graph(target_stats, replicate_ecc_moments=True, rng=rng)
+        return G_nx
+    elif method == "anndgED":
+        G_nx, _ = anndg_generate_graph(target_stats, replicate_ecc_moments=True, replicate_diameter=True, rng=rng)
         return G_nx
     elif method == "pdd":
         if "observed_nx" not in target_stats: raise ValueError("Method 'pdd' requires 'observed_nx' in target_stats.")
@@ -162,6 +170,7 @@ def generate_synthetic_variants(
     rng: np.random.Generator,
     project_root: Path,
     output_dir: Path,
+    num_workers: int,
 ) -> None:
     """Generates V synthetic variants for a dataset using a given method and saves them to disk.
 
@@ -178,6 +187,7 @@ def generate_synthetic_variants(
         project_root: Root directory of the project (used to locate configs).
         output_dir: Directory where the variant ``.pt`` files will be written.
             Created automatically if it does not exist.
+        num_workers: Number of worker processes for parallel generation.
     Raises:
         ValueError: If ``method`` is not a recognised generation method.
     """
@@ -202,38 +212,77 @@ def generate_synthetic_variants(
     variant_datasets: list[list[Data]] = [[] for _ in range(num_variants)]
     variant_seeds:    list[list[int]]  = [[] for _ in range(num_variants)]
 
-    with logging_redirect_tqdm():
-        pbar = tqdm(range(len(dataset_obj)), desc=f"Phase A [{dataset_name}/{method}]")
-        for i in pbar:
-            data = dataset_obj[i]
-            obs_ig = pytorch_to_igraph(data)
+    # Pre-generate all seeds to ensure reproducibility and pass them to workers
+    # We need a seed for each (graph, variant) pair
+    all_seeds = [
+        [int(rng.integers(0, 2**31)) for _ in range(num_variants)]
+        for _ in range(len(dataset_obj))
+    ]
+
+    # Pre-collect all necessary data for workers to avoid passing the whole dataset_obj
+    tasks = []
+    for i in range(len(dataset_obj)):
+        data = dataset_obj[i]
+        target_stats = get_target_stats(dataset_obj, i)
+        
+        obs_nx = None
+        if method == "pdd" or method == "ergm":
+            obs_nx = igraph_to_networkx(pytorch_to_igraph(data))
             
-            target_stats = get_target_stats(dataset_obj, i)
-                
-            if method == "pdd" or method == "ergm":
-                target_stats["observed_nx"] = igraph_to_networkx(obs_ig)
+        tasks.append({
+            'i': i,
+            'target_stats': target_stats,
+            'y': data.y,
+            'obs_nx': obs_nx,
+            'seeds': all_seeds[i]
+        })
 
+    if num_workers > 1:
+        logger.info(f"Generating synthetic variants in parallel using {num_workers} workers...")
+        worker_func = partial(
+            _worker_generate_variants,
+            method=method,
+            num_variants=num_variants
+        )
+        
+        # Use a reasonable chunksize for imap
+        chunksize = max(1, len(tasks) // (num_workers * 2))
+
+        with mp.Pool(processes=num_workers) as pool:
+            results = list(tqdm(
+                pool.imap_unordered(worker_func, tasks, chunksize=chunksize),
+                total=len(tasks),
+                desc=f"Phase A [{dataset_name}/{method}]"
+            ))
+            
+        # Reconstruct variant_datasets from results
+        # results is a list of (graph_idx, list_of_graphs, list_of_seeds)
+        results.sort(key=lambda x: x[0])
+        for i, graphs, seeds, worker_errors in results:
+            for variant_idx, exc_msg in worker_errors:
+                logger.error(f"Generation failed for graph {i} variant {variant_idx} (method={method}): {exc_msg}")
             for v in range(num_variants):
-                current_seed = int(rng.integers(0, 2**31))
-                try:
-                    synth_nx = generate_graph(target_stats, method, np.random.default_rng(current_seed))
-                    synth_ig = networkx_to_igraph(synth_nx)
-                    synth_pyg = igraph_to_pytorch(synth_ig, data.y)
-
-                    variant_datasets[v].append(synth_pyg)
-                    variant_seeds[v].append(current_seed)
-
-                except Exception as exc:
-                    logger.error(f"Generation failed for graph {i} variant {v} (method={method}): {exc}")
-                    variant_datasets[v].append(remove_features(data))
-                    variant_seeds[v].append(-1)
+                variant_datasets[v].append(graphs[v])
+                variant_seeds[v].append(seeds[v])
+    else:
+        with logging_redirect_tqdm():
+            pbar = tqdm(tasks, desc=f"Phase A [{dataset_name}/{method}]")
+            for task in pbar:
+                i, graphs, seeds, worker_errors = _worker_generate_variants(
+                    task, method, num_variants
+                )
+                for variant_idx, exc_msg in worker_errors:
+                    logger.error(f"Generation failed for graph {i} variant {variant_idx} (method={method}): {exc_msg}")
+                for v in range(num_variants):
+                    variant_datasets[v].append(graphs[v])
+                    variant_seeds[v].append(seeds[v])
 
     # Persist each variant to disk
     for v, (graphs, seeds) in enumerate(zip(variant_datasets, variant_seeds)):
         filename = f"{dataset_name}_synth_v{v}.pt"
         
         synth_stats = per_graph_statistics(graphs, show_progress=False)
-        synth_agg_class = aggregate_statistics_per_class(graphs, synth_stats)
+        synth_agg = aggregate_statistics(synth_stats)
         
         metadata = {
             "source": method,
@@ -242,8 +291,43 @@ def generate_synthetic_variants(
             "num_variants": num_variants,
             "seeds": seeds,
             "per_graph_statistics": synth_stats,
-            "aggregate_statistics_per_class": synth_agg_class,
+            "aggregate_statistics": synth_agg,
         }
         
         save_synthetic_dataset(graphs, output_dir, filename, extra_metadata=metadata)
         logger.info(f"Saved variant {v + 1}/{num_variants} for {dataset_name}/{method} → {output_dir / filename}")
+
+
+def _worker_generate_variants(task, method, num_variants):
+    """Worker function for parallel generation."""
+    # Ensure workers don't oversubscribe CPUs with internal threading
+    torch.set_num_threads(1)
+    
+    i = task['i']
+    target_stats = task['target_stats']
+    y = task['y']
+    obs_nx = task['obs_nx']
+    seeds_list = task['seeds']
+
+    if obs_nx is not None:
+        target_stats["observed_nx"] = obs_nx
+        
+    graphs = []
+    seeds = []
+    errors = []
+    for v in range(num_variants):
+        current_seed = seeds_list[v]
+        try:
+            synth_nx = generate_graph(target_stats, method, np.random.default_rng(current_seed))
+            synth_ig = networkx_to_igraph(synth_nx)
+            synth_pyg = igraph_to_pytorch(synth_ig, y)
+            graphs.append(synth_pyg)
+            seeds.append(current_seed)
+        except Exception as exc:
+            errors.append((v, str(exc)))
+            # Let's create a minimal graph with 1 node.
+            dummy_pyg = Data(x=torch.ones((1, 1)), edge_index=torch.empty((2, 0), dtype=torch.long), y=y, num_nodes=1)
+            graphs.append(dummy_pyg)
+            seeds.append(-1)
+            
+    return i, graphs, seeds, errors

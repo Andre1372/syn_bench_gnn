@@ -67,6 +67,55 @@ def _compute_diameter_objective(actual_diameter: float, target_diameter: float) 
     return abs(actual_diameter - target_diameter) / target_diameter
 
 
+def _compute_eccentricity_objective(actual_ecc_moments: np.ndarray, target_ecc_moments: np.ndarray) -> float:
+    """Calculates the structural error between actual and target eccentricity moments.
+    
+    The error is computed by applying an arcsinh transformation to both actual and target
+    values to stabilize variance across different scales, followed by a power-law 
+    penalty (exponent 1.5). The individual moment losses (mean, variance, skewness, 
+    kurtosis) are aggregated using an L2 norm.
+
+    Args:
+        actual_ecc_moments: NumPy array containing the moments [mean, var, skew, kurt] of 
+            the current graph's eccentricity distribution.
+        target_ecc_moments: NumPy array containing the moments of the target distribution.
+    Returns:
+        A scalar penalty value representing the discrepancy in eccentricity moments.
+    """
+    k = len(target_ecc_moments)
+    moment_losses = np.zeros(k)
+
+    def _compute_metric_loss(actual_value, target_value):
+        a = np.arcsinh(actual_value)
+        b = np.arcsinh(target_value)
+        loss = np.abs(a - b)**1.5
+
+        return loss
+
+    # Mean loss
+    mean_actual, mean_target = actual_ecc_moments[0], target_ecc_moments[0]
+    moment_losses[0] = _compute_metric_loss(mean_actual, mean_target)
+    
+    # Variance loss
+    if k > 1:
+        var_actual, var_target = actual_ecc_moments[1], target_ecc_moments[1]
+        moment_losses[1] = _compute_metric_loss(var_actual, var_target)
+    
+    # Skewness loss (evaluated only when variance is stable)
+    if k > 2 and var_actual > 1e-12:
+        skew_actual, skew_target = actual_ecc_moments[2], target_ecc_moments[2]
+        moment_losses[2] = _compute_metric_loss(skew_actual, skew_target)
+        
+    # Kurtosis loss
+    if k > 3:
+        kurt_actual, kurt_target = actual_ecc_moments[3], target_ecc_moments[3]
+        moment_losses[3] = _compute_metric_loss(kurt_actual, kurt_target)
+            
+    penalty = float(np.mean(moment_losses ** 2.0) ** 0.5)
+    
+    return penalty
+
+
 def _propose_double_edge_swap(graph_state: GraphState, rng: np.random.Generator) -> GraphChange | None:
     """Propose a random degree-preserving double edge swap."""
     if graph_state.num_edges < 2:
@@ -103,6 +152,7 @@ def optimizer(
     initial_graph: ig.Graph, 
     target_annd: np.ndarray, 
     target_diameter: float | None = None,
+    target_ecc_moments: np.ndarray | None = None,
     rng: np.random.Generator | None = None, 
     debug: bool = False
 ) -> tuple[GraphState, float]:
@@ -127,6 +177,7 @@ def optimizer(
     graph_state = GraphState(initial_graph)
     initial_annd = graph_state.get_annd(bins=bins)
     initial_diameter = graph_state.exact_diameter if target_diameter is not None else None
+    initial_ecc_moments = graph_state.ecc_moments if target_ecc_moments is not None else None
     
     # Compute binned degree distribution for weighting (matches the binning in get_annd)
     degree_distribution = _get_binned_degree_distribution(graph_state._degrees, bins=bins)
@@ -147,6 +198,8 @@ def optimizer(
     current_error = _compute_annd_objective(initial_annd, target_annd, weights=degree_distribution)
     if target_diameter is not None:
         current_error = 0.9 * current_error + 0.1 * _compute_diameter_objective(initial_diameter, target_diameter)
+    if target_ecc_moments is not None:
+        current_error = 0.7 * current_error + 0.3 * _compute_eccentricity_objective(initial_ecc_moments, target_ecc_moments)
     
     errors_history = [current_error] if debug else []
     assortativity_errors_history = []
@@ -185,7 +238,9 @@ def optimizer(
         proposed_error = _compute_annd_objective(graph_state.get_annd(bins=bins), target_annd, weights=degree_distribution)
         if target_diameter is not None:
             proposed_error = 0.9 * proposed_error + 0.1 * _compute_diameter_objective(graph_state.exact_diameter, target_diameter)
-        
+        if target_ecc_moments is not None:
+            proposed_error = 0.7 * proposed_error + 0.3 * _compute_eccentricity_objective(graph_state.ecc_moments, target_ecc_moments)
+
         if rng.random() < np.exp((best_state['error'] - proposed_error) / temperature):
             # accept
             current_error = proposed_error

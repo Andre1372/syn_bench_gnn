@@ -60,28 +60,6 @@ def aggregate_statistics(per_graph_stats: list[dict[str, Any]]) -> dict[str, Any
     return mean_stats
 
 
-def aggregate_statistics_per_class(data_list: list[Data], per_graph_stats: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
-    """Computes the mean for network statistics across the dataset, grouped by class label.
-
-    Args:
-        data_list: List of PyG Data graphs.
-        per_graph_stats: List of dictionaries containing absolute statistics for each graph.
-    Returns:
-        A dictionary mapping class labels (as strings) to a dictionary of aggregated statistics.
-    """
-    class_groups = defaultdict(list)
-    for data, stats in zip(data_list, per_graph_stats):
-        label = int(data.y.item())
-        class_groups[label].append(stats)
-        
-    class_stats = {}
-    for label, stats_list in class_groups.items():
-        if stats_list:
-            class_stats[str(label)] = aggregate_statistics(stats_list)
-            
-    return class_stats
-
-
 def per_graph_statistics(data_list: list[Data], show_progress: bool = False) -> list[dict[str, Any]]:
     """Calculates absolute topological and motif statistics for each graph in a list.
 
@@ -118,6 +96,7 @@ def analyze_single_graph(graph: ig.Graph) -> dict[str, float]:
     efficiency = calculate_global_efficiency(graph)
     diameter = calculate_diameter(graph)
     annd = calculate_annd(graph)
+    ecc_moments = calculate_eccentricity_moments(graph, k=4)
 
     stats_dict: dict[str, float] = {
         "n_nodes": int(graph.vcount()),
@@ -128,7 +107,8 @@ def analyze_single_graph(graph: ig.Graph) -> dict[str, float]:
         "efficiency": efficiency,
         "diameter": diameter,
         "annd": annd,
-        "normalized_degree_moments": deg_moments
+        "normalized_degree_moments": deg_moments,
+        "ecc_moments": ecc_moments
     }
 
     # for i, val in enumerate(motifs):
@@ -204,6 +184,41 @@ def calculate_annd(graph: ig.Graph, bins: int = 4) -> np.ndarray:
         group.mean() if group.size > 0 else 0.0 
         for group in np.array_split(sorted_annd, bins)
     ], dtype=float)
+
+
+def calculate_eccentricity_moments(graph: ig.Graph, k: int = 4) -> np.ndarray:
+    """Calculates the raw eccentricity moments of the graph.
+    
+    Eccentricity is the maximum shortest path distance from a node to any 
+    other node in the graph: e(u) = max_{v \in V} d(u, v). 
+        
+    Args:
+        graph: The input igraph.Graph object.
+        k: The number of moments to calculate. Must be strictly positive.
+    Returns:
+        An array of length `k` containing the eccentricity moments.        
+    Raises:
+        ValueError: If `k` is less than 1 or greater than 4.
+    """
+    if k < 1 or k > 4: raise ValueError(f"Number of moments 'k' must be between 1 and 4, got {k}.")
+    
+    n = graph.vcount()
+    if n == 0: return np.zeros(k, dtype=np.float64)
+
+    # Leverage igraph's highly optimized C backend for shortest path calculations
+    eccentricities = np.array(graph.eccentricity(), dtype=np.float64)
+
+    m1 = float(np.mean(eccentricities))
+    m2 = float(np.var(eccentricities, ddof=0))
+
+    if m2 > 1e-10:
+        m3 = float(stats.skew(eccentricities, bias=False))
+        m4 = float(stats.kurtosis(eccentricities, bias=False)) + 3.0
+    else:
+        m3 = 0.0
+        m4 = 3.0
+
+    return np.array([m1, m2, m3, m4])[:k]
 
 
 def count_motifs(graph: ig.Graph, k: int, sampling_probs: list[float] | None = None) -> np.ndarray:
@@ -397,7 +412,7 @@ def calculate_moments_error(obtained_moments: np.ndarray, target_moments: np.nda
 def calculate_annd_error(
     obtained_annd: np.ndarray, obtained_degree_sequence: np.ndarray, 
     target_annd: np.ndarray, target_degree_sequence: np.ndarray) -> float:
-    r"""Calculates the structural error between obtained ANND and target ANND.
+    """Calculates the structural error between obtained ANND and target ANND.
     
     Args:
         obtained_annd: NumPy array of obtained ANND.
@@ -417,15 +432,57 @@ def calculate_annd_error(
     p_obtained = np.bincount(obtained_degree_sequence, minlength=bins + 1)[1:bins + 1] / len(obtained_degree_sequence)
 
     # Weights w(k) = (P1(k) + P2(k)) / 2
-    weights = (p_target + p_obtained) * 0.5
+    weights = (obtained_annd + p_obtained) * 0.5
     
-    # Squared differences
-    diff = obtained_annd - target_annd
-    weighted_variance = np.dot(weights, diff * diff)
-    error = np.sqrt(weighted_variance)
-
-    # x = 10.0 * (actual_annd - target_annd)
-    # log_cosh = np.abs(x) - np.log(2.0) + np.log1p(np.exp(-2.0 * np.abs(x)))
-    # error = np.dot(weights, log_cosh)
+    x = 10.0 * (obtained_annd - target_annd)
+    log_cosh = np.abs(x) - np.log(2.0) + np.log1p(np.exp(-2.0 * np.abs(x)))
+    error = np.dot(weights, log_cosh)
     
     return float(error)
+
+
+def calculate_eccentricity_error(obtained_ecc_moments: np.ndarray, target_ecc_moments: np.ndarray) -> float:
+    """Calculates the structural error between obtained eccentricity moments and target eccentricity moments.
+    
+    Args:
+        obtained_ecc_moments: NumPy array of obtained eccentricity moments.
+        target_ecc_moments: NumPy array of target eccentricity moments.
+    Returns:
+        A scalar error value representing the discrepancy in eccentricity moments.
+    """    
+    k = len(target_ecc_moments)
+    if k < 1: raise ValueError("Target eccentricity moments must have at least one element.")
+    if len(obtained_ecc_moments) != k:
+        raise ValueError("Obtained and target eccentricity moments must have the same length.")
+    
+    moment_losses = np.zeros(k)
+
+    def _compute_metric_loss(actual_value, target_value):
+        a = np.arcsinh(actual_value)
+        b = np.arcsinh(target_value)
+        loss = np.abs(a - b)**1.5
+
+        return loss
+
+    # Mean loss
+    mean_actual, mean_target = obtained_ecc_moments[0], target_ecc_moments[0]
+    moment_losses[0] = _compute_metric_loss(mean_actual, mean_target)
+    
+    # Variance loss
+    if k > 1:
+        var_actual, var_target = obtained_ecc_moments[1], target_ecc_moments[1]
+        moment_losses[1] = _compute_metric_loss(var_actual, var_target)
+    
+    # Skewness loss (evaluated only when variance is stable)
+    if k > 2 and var_actual > 1e-12:
+        skew_actual, skew_target = obtained_ecc_moments[2], target_ecc_moments[2]
+        moment_losses[2] = _compute_metric_loss(skew_actual, skew_target)
+        
+    # Kurtosis loss
+    if k > 3:
+        kurt_actual, kurt_target = obtained_ecc_moments[3], target_ecc_moments[3]
+        moment_losses[3] = _compute_metric_loss(kurt_actual, kurt_target)
+            
+    penalty = float(np.mean(moment_losses ** 2.0) ** 0.5)
+    
+    return penalty

@@ -15,7 +15,7 @@ from torch_geometric.nn import global_mean_pool, global_max_pool
 from torch_geometric.nn.models import GCN, GIN
 
 from src.data_utils import make_loaders, DatasetPT, remove_features
-from src.graph_analysis import per_graph_statistics, aggregate_statistics_per_class
+from src.graph_analysis import per_graph_statistics, aggregate_statistics
 
 logger = logging.getLogger(__name__)
 
@@ -338,28 +338,20 @@ def evaluate_dataset(
         
     seeds = metadata.get("seeds", None)
 
-    global_stats_list: list[dict[str, Any]] = []
+    global_stats: dict[str, Any] = {}
     per_graph_stats: list[dict[str, float]] = []
 
     if "per_graph_statistics" in metadata:
          per_graph_stats = metadata["per_graph_statistics"]
-    if "aggregate_statistics_per_class" in metadata:
-        for cls_label, cls_stats in metadata["aggregate_statistics_per_class"].items():
-            class_dict = {"graph_class": cls_label}
-            for stat_name, stat_val in cls_stats.items():
-                class_dict[stat_name] = stat_val
-            global_stats_list.append(class_dict)
-                
-    if not per_graph_stats:
+
+    if "aggregate_statistics" in metadata:
+        global_stats = metadata["aggregate_statistics"]
+    elif per_graph_stats:
+        global_stats = aggregate_statistics(per_graph_stats)
+    else:
         logger.debug("Computing network statistics locally for %s...", source)
-        local_pg_stats = per_graph_statistics(data_list)
-        per_graph_stats = local_pg_stats
-        agg_class = aggregate_statistics_per_class(data_list, local_pg_stats)
-        for cls_label, cls_stats in agg_class.items():
-            class_dict = {"graph_class": cls_label}
-            for stat_name, stat_val in cls_stats.items():
-                class_dict[stat_name] = stat_val
-            global_stats_list.append(class_dict)
+        per_graph_stats = per_graph_statistics(data_list)
+        global_stats = aggregate_statistics(per_graph_stats)
 
     # Accumulate correctness counts across all runs for each model
     num_graphs = len(data_list)
@@ -392,14 +384,13 @@ def evaluate_dataset(
 
             n_correct[model_name] += get_per_graph_predictions(model, data_list, device, batch_size)
 
-            for cls_stats in global_stats_list:
-                global_results.append({
-                    "dataset": dataset_name,
-                    "source": source,
-                    "model": model_name,
-                    **run_result,
-                    **cls_stats,
-                })
+            global_results.append({
+                "dataset": dataset_name,
+                "source": source,
+                "model": model_name,
+                **run_result,
+                **global_stats,
+            })
         
         if pbar: pbar.update(1)
 
