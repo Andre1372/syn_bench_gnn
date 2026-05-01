@@ -22,13 +22,12 @@ class GraphChange:
 class GraphState:
     """Capsulates the graph state allowing O(1) local operations."""
 
-    def __init__(self, graph: ig.Graph) -> None:
+    def __init__(self, graph: ig.Graph, bins: int) -> None:
         """Initializes the GraphState.
-
-        Populates the fast adjacency list structure for O(1) lookups.
 
         Args:
             graph: The initial igraph.Graph object.
+            bins: The number of bins to use for ANND aggregation.
         Raises:
             ValueError: If the graph is directed or not simple.
         """
@@ -53,6 +52,22 @@ class GraphState:
                 self._edges.append(edge)
 
         self._degrees = np.array(graph.degree(), dtype=int)
+        self._num_active_nodes: int = int(np.count_nonzero(self._degrees))
+        
+        # Fix the binning permutation at initialization for consistency.
+        # We only bin nodes that are active (degree > 0).
+        if self._num_active_nodes > 0:
+            active_mask = self._degrees > 0
+            active_indices = np.where(active_mask)[0]
+            # Sort active indices by their initial degree
+            self._fixed_active_indices = active_indices[np.argsort(self._degrees[active_mask])]
+        else:
+            self._fixed_active_indices = np.array([], dtype=int)
+        
+        self._bins = bins
+        self._bin_indices_cache: dict[int, list[np.ndarray]] = {}
+        if self._num_active_nodes > 0:
+            self._bin_indices_cache[bins] = np.array_split(self._fixed_active_indices, bins)
 
     @property
     def num_nodes(self) -> int:
@@ -78,8 +93,6 @@ class GraphState:
     def approximate_diameter(self) -> int:
         """
         Returns the approximate diameter of the graph using a two-sweep BFS.
-        This provides a lower bound and is exact for trees. For general graphs, 
-        it is highly efficient but may under-estimate the true diameter by a small margin.
         """
         if self._num_nodes <= 1 or self._num_edges == 0:
             return 0
@@ -119,7 +132,7 @@ class GraphState:
                 
                 if comp_diam > max_diam:
                     max_diam = comp_diam
-                    
+        
         return max_diam
 
     def has_edge(self, u: int, v: int) -> bool:
@@ -141,36 +154,21 @@ class GraphState:
         idx = rng.integers(0, len(self._edges))
         return self._edges[idx]
 
-    def get_annd(self, bins:int = 5) -> np.ndarray:
+    def get_annd(self) -> np.ndarray:
         """
         Computes the Average Nearest Neighbor Degree (ANND) of the graph, normalizes it and bins it into percentiles.
-
-        ANND characterizes degree-degree correlations. The function normalizes neighbor degrees 
-        by the maximum possible degree (N-1) and aggregates nodes into 'bins' percentile groups 
-        based on their degree rank.
-
-        Args:
-            bins: The number of percentile bins to aggregate into.
-        Returns:
-            np.ndarray: Array of length `bins` containing the mean normalized ANND per bin.
         """
-        if self._num_nodes == 0: return np.zeros(bins, dtype=float)
-
+        if self._num_nodes == 0: return np.zeros(self._bins, dtype=float)
+        if self._num_active_nodes <= 1: return np.zeros(self._bins, dtype=float)
+        
         knn_nodes, _ = self.get_graph().knn()
-
-        if not knn_nodes: return np.zeros(bins, dtype=float)
-
-        # Normalize by (N-1) and handle NaNs from isolated nodes
         annd_raw = np.array(knn_nodes, dtype=float)
-        annd_norm = np.nan_to_num(annd_raw / (self._num_nodes - 1), nan=0.0)
+        norm_factor = (self._num_active_nodes - 1)
 
-        # Sort ANND by degree rank to enable grouping into percentile bins
-        sorted_annd = annd_norm[np.argsort(self._degrees)]
-
-        # Partition and average using array_split to handle non-divisible N_nodes gracefully
+        # Calculate mean for each fixed group of nodes using pre-calculated indices
         return np.array([
-            group.mean() if group.size > 0 else 0.0 
-            for group in np.array_split(sorted_annd, bins)
+            annd_raw[indices].mean() / norm_factor if indices.size > 0 else 0.0 
+            for indices in self._bin_indices_cache[self._bins]
         ], dtype=float)
 
     def copy(self) -> 'GraphState':
@@ -183,6 +181,10 @@ class GraphState:
         new_state._edges = list(self._edges)
         new_state._edge_to_idx = dict(self._edge_to_idx)
         new_state._degrees = self._degrees.copy()
+        new_state._num_active_nodes = self._num_active_nodes
+        new_state._fixed_active_indices = self._fixed_active_indices.copy()
+        new_state._bins = self._bins
+        new_state._bin_indices_cache = {k: [idx.copy() for idx in v] for k, v in self._bin_indices_cache.items()}
         return new_state
 
     def apply_change(self, change: GraphChange) -> None:

@@ -46,45 +46,56 @@ def plot_graph(
     ax.axis("off")
 
 
-def plot_annd(graph: nx.Graph, ax: plt.Axes, title: str = "Average Nearest Neighbor Degree", label: str = 'Empirical $k_{nn}(k)$') -> None:
-    """Visualizes the average nearest neighbor degree for a given graph.
+def plot_annd(
+    graph: nx.Graph, 
+    ax: plt.Axes, 
+    title: str = "Average Nearest Neighbor Degree", 
+    label: str = 'Synthetic $k_{nn}(k)$',
+    target_graph: nx.Graph | None = None,
+    bins: int = 4
+) -> None:
+    """Visualizes the average nearest neighbor degree for a given graph, 
+    optionally overlaying a target graph for comparison.
 
     Args:
-        graph: The networkx graph to analyze.
+        graph: The networkx graph to analyze (synthetic/primary).
         ax: The matplotlib Axes to draw onto.
         title: Title for the plot.
-        label: Label for the legend.
+        label: Label for the primary graph.
+        target_graph: Optional networkx graph to overlay (original/target).
+        bins: Number of percentile bins for aggregation.
     """
     # Convert to igraph to use the shared analysis logic
     ig_graph = networkx_to_igraph(graph)
-    annd_values = calculate_annd(ig_graph)
+    annd_values = calculate_annd(ig_graph, bins=bins)
     
     if len(annd_values) == 0:
         return
     
-    # calculate_annd returns an array where index k corresponds to degree k+1
-    degrees = np.arange(1, len(annd_values) + 1)
-    values = annd_values
+    # calculate_annd returns binned values
+    x_axis = np.arange(1, len(annd_values) + 1)
     
-    # Filter out entries where ANND is 0 (meaning degree not present or no neighbors)
-    mask = values > 0
-    degrees = degrees[mask]
-    values = values[mask]
+    # Plot target graph first if provided (in background)
+    if target_graph is not None:
+        ig_target = networkx_to_igraph(target_graph)
+        target_values = calculate_annd(ig_target, bins=bins)
+        
+        # Plot target in red
+        ax.plot(x_axis, target_values, color='#dc2626', linestyle='--', linewidth=2, alpha=0.8, 
+                marker='o', markersize=8, markerfacecolor='white', markeredgewidth=1.5, label='Original $k_{nn}(k)$')
 
-    if len(degrees) == 0:
-        return
+    # Plot primary graph
+    ax.scatter(x_axis, annd_values, color='#2c3e50', s=100, alpha=0.8, edgecolors='white', linewidth=1.5, label=label)
+    ax.plot(x_axis, annd_values, color='#3498db', linestyle='-', linewidth=2, alpha=0.5)
 
-    ax.scatter(degrees, values, color='#2c3e50', s=100, alpha=0.8, edgecolors='white', linewidth=1.5, label=label)
-    ax.plot(degrees, values, color='#3498db', linestyle='-', linewidth=2, alpha=0.5)
-
-    ax.set_xlabel("Degree $k$", fontsize=12, fontweight='bold')
+    ax.set_xlabel("Percentile Bin Index", fontsize=12, fontweight='bold')
     ax.set_ylabel("Avg. Neighbor Degree $k_{nn}(k)$", fontsize=12, fontweight='bold')
     ax.set_title(title, fontsize=14, pad=15)
     ax.grid(True, linestyle="--", alpha=0.3)
     ax.spines['top'].set_visible(False)
     ax.spines['right'].set_visible(False)
-    if label:
-        ax.legend(frameon=True, facecolor='white', framealpha=0.9)
+    
+    ax.legend(frameon=True, facecolor='white', framealpha=0.9)
 
 
 def add_baseline_guide(

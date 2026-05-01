@@ -148,7 +148,7 @@ def count_deg_moments(graph: ig.Graph) -> np.ndarray:
     return np.array([m1, m2, m3, m4])
 
 
-def calculate_annd(graph: ig.Graph, bins: int = 4) -> np.ndarray:
+def calculate_annd(graph: ig.Graph, bins: int = 4, compute_variances: bool = False) -> np.ndarray:
     """
     Computes the Average Nearest Neighbor Degree (ANND) of the graph, normalizes it and bins it into percentiles.
 
@@ -171,13 +171,23 @@ def calculate_annd(graph: ig.Graph, bins: int = 4) -> np.ndarray:
     if not knn_nodes:
         return np.zeros(bins, dtype=float)
 
-    # Normalize by (N-1) and handle NaNs from isolated nodes
-    annd_raw = np.array(knn_nodes, dtype=float)
-    annd_norm = np.nan_to_num(annd_raw / (n_nodes - 1), nan=0.0)
-
-    # Sort ANND by degree rank to enable grouping into percentile bins
     node_degrees = np.array(graph.degree(), dtype=int)
-    sorted_annd = annd_norm[np.argsort(node_degrees)]
+    n_active = np.count_nonzero(node_degrees)
+
+    if n_active <= 1:
+        return np.zeros(bins, dtype=float)
+
+    if n_active == n_nodes:
+        # Fast-path: no isolated nodes, no masking needed
+        annd_norm = np.array(knn_nodes, dtype=float) / (n_nodes - 1)
+        sorted_annd = annd_norm[np.argsort(node_degrees)]
+    else:
+        # Consider only active nodes
+        active_mask = node_degrees > 0
+        annd_active = np.array(knn_nodes, dtype=float)[active_mask]
+        degrees_active = node_degrees[active_mask]
+        annd_norm = annd_active / (n_active - 1)
+        sorted_annd = annd_norm[np.argsort(degrees_active)]
 
     # Partition and average using array_split to handle non-divisible N_nodes gracefully
     return np.array([
@@ -409,33 +419,17 @@ def calculate_moments_error(obtained_moments: np.ndarray, target_moments: np.nda
     return penalty
 
 
-def calculate_annd_error(
-    obtained_annd: np.ndarray, obtained_degree_sequence: np.ndarray, 
-    target_annd: np.ndarray, target_degree_sequence: np.ndarray) -> float:
+def calculate_annd_error(obtained_annd: np.ndarray, target_annd: np.ndarray) -> float:
     """Calculates the structural error between obtained ANND and target ANND.
     
     Args:
         obtained_annd: NumPy array of obtained ANND.
-        obtained_degree_sequence: NumPy array of obtained degree sequence.
         target_annd: NumPy array of target ANND.
-        target_degree_sequence: NumPy array of target degree sequence.
     Returns:
         A scalar error value representing the discrepancy in ANND.
     """    
-    bins = len(obtained_annd)
-
-    # Target distribution
-    # Slicing from 1 to max_k+1 pulls degrees [1, ..., max_k]
-    p_target = np.bincount(target_degree_sequence, minlength=bins + 1)[1:bins + 1] / len(target_degree_sequence)
-        
-    # Obtained distribution
-    p_obtained = np.bincount(obtained_degree_sequence, minlength=bins + 1)[1:bins + 1] / len(obtained_degree_sequence)
-
-    # Weights w(k) = (P1(k) + P2(k)) / 2
-    weights = (obtained_annd + p_obtained) * 0.5
-
     loss = np.log1p(40 * np.abs(obtained_annd - target_annd)**1.5)
-    error = np.dot(weights, loss)
+    error = np.mean(loss)
     
     return float(error)
 

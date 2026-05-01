@@ -60,16 +60,11 @@ def load_generation_data() -> pd.DataFrame:
             dataset_obj = DatasetPT(orig_pt_path)
             per_graph_stats = dataset_obj.metadata.get("per_graph_statistics", [])
             for i, stats in enumerate(per_graph_stats):
-                # Get original degree sequence for ANND error
-                graph_pyg = dataset_obj[i]
-                deg_seq = np.array(pytorch_to_igraph(graph_pyg).degree())
-                
                 deg_moments, annd, ecc_moments = extract_errors(stats)
                 original_stats_map[(dataset_name, i)] = {
                     "deg_moments": deg_moments,
                     "annd": annd,
                     "ecc_moments": ecc_moments,
-                    "deg_seq": deg_seq
                 }
                 
                 row = {
@@ -103,17 +98,13 @@ def load_generation_data() -> pd.DataFrame:
                 dataset_obj = DatasetPT(v_path)
                 per_graph_stats = dataset_obj.metadata.get("per_graph_statistics", [])
                 for i, stats in enumerate(per_graph_stats):
-                    # Get synthetic degree sequence for ANND error
-                    graph_pyg = dataset_obj[i]
-                    deg_seq = np.array(pytorch_to_igraph(graph_pyg).degree())
-                    
                     # Get target stats
                     orig = original_stats_map.get((dataset_name, i))
                     if orig:
                         deg_moments, annd, ecc_moments = extract_errors(stats)
                         
                         dm_err = calculate_moments_error(deg_moments, orig["deg_moments"])
-                        annd_err = calculate_annd_error(annd, deg_seq, orig["annd"], orig["deg_seq"])
+                        annd_err = calculate_annd_error(annd, orig["annd"])
                         ecc_err = calculate_eccentricity_error(ecc_moments, orig["ecc_moments"])
                     else:
                         dm_err = annd_err = ecc_err = np.nan

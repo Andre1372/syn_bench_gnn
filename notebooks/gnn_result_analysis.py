@@ -25,42 +25,6 @@ from notebooks.visualization_utils import add_baseline_guide, plot_performance_d
 from src.data_utils import DatasetPT
 from src.graph_analysis import calculate_moments_error, calculate_annd_error, calculate_eccentricity_error
 
-# --- Shared Caching Utilities ---
-_DEGREE_CACHE = {}
-
-def get_degree_sequence(dataset_path: str | Path, idx: int) -> np.ndarray | None:
-    """Retrieves the degree sequence for a specific graph in a PyG dataset.
-    
-    Results are cached per dataset_path to avoid redundant torch.load calls.
-    """
-    path = Path(dataset_path)
-    if path not in _DEGREE_CACHE:
-        if not path.exists():
-            _DEGREE_CACHE[path] = None
-        else:
-            try:
-                # Use the robust DatasetPT loader to handle collated PyG datasets
-                dataset = DatasetPT(path)
-                seqs = []
-                for i in range(len(dataset)):
-                    data = dataset[i]
-                    row = data.edge_index[0]
-                    # num_nodes is reliably inferred by DatasetPT/Batch
-                    n = data.num_nodes
-                    deg = np.zeros(n, dtype=int)
-                    if row.numel() > 0:
-                        np.add.at(deg, row.numpy(), 1)
-                    seqs.append(deg)
-                _DEGREE_CACHE[path] = seqs
-            except Exception as e:
-                print(f"Error loading {path}: {e}")
-                _DEGREE_CACHE[path] = None
-                
-    ds_seqs = _DEGREE_CACHE[path]
-    if ds_seqs and 0 <= idx < len(ds_seqs):
-        return ds_seqs[idx]
-    return None
-
 
 
 # Cell 1 - Global Variables & Data Loading
@@ -223,25 +187,7 @@ def load_experiment_data() -> Tuple[pd.DataFrame, pd.DataFrame]:
                 if not isinstance(a_annd, np.ndarray) or len(a_annd) == 0:
                     a_annd = np.zeros(1)
                 
-                # Determine paths to original/synthetic files
-                t_path = PROJECT_ROOT / "data" / ds / f"{ds}_original.pt"
-                if row["source"] == "original":
-                    a_path = t_path
-                else:
-                    try:
-                        method, variant = row["source"].rsplit("_", 1)
-                        a_path = PROJECT_ROOT / "synthetic_data" / ds / method / f"{ds}_synth_v{variant}.pt"
-                    except ValueError:
-                        return np.nan
-                
-                # Retrieve degree sequences for weighting from files
-                t_deg_seq = get_degree_sequence(t_path, g_idx)
-                a_deg_seq = get_degree_sequence(a_path, g_idx)
-                
-                if t_deg_seq is None or a_deg_seq is None:
-                    return np.nan
-                
-                return calculate_annd_error(a_annd, a_deg_seq, t_annd, t_deg_seq)
+                return calculate_annd_error(a_annd, t_annd)
             
             def compute_diameter_error(row):
                 ds = row["dataset"]

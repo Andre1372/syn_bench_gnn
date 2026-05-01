@@ -21,14 +21,13 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from src.data_utils import pytorch_to_networkx, networkx_to_igraph, DatasetPT
 from src.graph_analysis import analyze_single_graph, calculate_annd_error
-from src.generate_datasets import generate_graph
 from notebooks.visualization_utils import plot_graph, plot_annd
+from src.anndg.graph_generator import generate_graph
 
 
 
 # Cell 1 - Global Variables & Data Loading
 DATASET = "BZR"
-METHOD = "anndg"  # Options: "padma", "anndg", etc.
 IDX = 330
 
 try:
@@ -44,8 +43,8 @@ GRAPH_IG = networkx_to_igraph(GRAPH_NX)
 # Cell 2 - Original Graph Analysis
 fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
 
-plot_graph(graph=GRAPH_NX, ax=ax1, dataset_name=f"{DATASET} ({METHOD})", graph_index=IDX)
-plot_annd(graph=GRAPH_NX, ax=ax2, title=f"ANND - {DATASET} ({METHOD})")
+plot_graph(graph=GRAPH_NX, ax=ax1, dataset_name=f"{DATASET}", graph_index=IDX)
+plot_annd(graph=GRAPH_NX, ax=ax2, title=f"ANND - {DATASET}")
 
 # Calculate and print assortativity
 target_stats = analyze_single_graph(GRAPH_IG)
@@ -56,15 +55,15 @@ plt.show()
 
 # Cell 3 - Synthetic Graph Generation (PADMA)
 # Generate synthetic graph
-rng = np.random.default_rng(seed=749995526)
-GRAPH_SYNTH_NX = generate_graph(target_stats, method=METHOD, rng=rng)
+rng = np.random.default_rng(seed=5)
+GRAPH_SYNTH_NX, info = generate_graph(target_stats, rng=rng, debug=True)
 GRAPH_SYNTH_IG = networkx_to_igraph(GRAPH_SYNTH_NX)
 
 # Plot synthetic results
 fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
 
 plot_graph(graph=GRAPH_SYNTH_NX, ax=ax1, dataset_name=f"{DATASET} (Synthetic)", graph_index=IDX)
-plot_annd(graph=GRAPH_SYNTH_NX, ax=ax2, title=f"ANND - Synthetic", label='Synthetic $k_{nn}(k)$')
+plot_annd(graph=GRAPH_SYNTH_NX, ax=ax2, title=f"ANND - Synthetic", label='Synthetic $k_{nn}(k)$', target_graph=GRAPH_NX)
 
 # Calculate and print assortativity
 obtained_stats = analyze_single_graph(GRAPH_SYNTH_IG)
@@ -89,16 +88,7 @@ print("-" * 70)
 # Structural error computation
 from src.graph_analysis import calculate_moments_error
 
-# Calculate degree sequences for ANND error
-deg_seq_original = np.array(GRAPH_IG.degree())
-deg_seq_synthetic = np.array(GRAPH_SYNTH_IG.degree())
-
-annd_error = calculate_annd_error(
-    obtained_annd=obtained_stats['annd'], 
-    obtained_degree_sequence=deg_seq_synthetic, 
-    target_annd=target_stats['annd'], 
-    target_degree_sequence=deg_seq_original
-)
+annd_error = calculate_annd_error(obtained_stats['annd'], target_stats['annd'])
 moments_error = calculate_moments_error(target_stats['normalized_degree_moments'], obtained_stats['normalized_degree_moments'])
 diameter_error = abs(obtained_stats['diameter'] - target_stats['diameter']) / target_stats['diameter'] if target_stats['diameter'] > 0 else 0.0
 

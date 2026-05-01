@@ -9,32 +9,6 @@ from src.anndg.graph_state import GraphState, GraphChange
 from src.graph_analysis import calculate_degree_assortativity
 
 
-def _get_binned_degree_distribution(degrees: np.ndarray, bins: int) -> np.ndarray:
-    """
-    Bins the degree distribution into percentile groups and returns the mean degree per bin.
-
-    Args:
-        degrees: Array of node degrees.
-        bins: Number of percentile bins.
-    Returns:
-        np.ndarray: Array of length `bins` containing the mean degree per bin.
-    """
-    if len(degrees) == 0:
-        return np.zeros(bins, dtype=float)
-    
-    # Sort degrees and partition into percentile bins
-    sorted_degrees = np.sort(degrees)
-
-    degree_distribution = np.array([
-        group.mean() if group.size > 0 else 0.0 
-        for group in np.array_split(sorted_degrees, bins)
-    ], dtype=float)
-
-    degree_distribution = degree_distribution / degree_distribution.sum() 
-
-    return degree_distribution
-
-
 def _compute_annd_objective(actual_annd: np.ndarray, target_annd: np.ndarray, weights: np.ndarray) -> float:
     """
     Calculates the weighted loss between actual and target ANND profiles.
@@ -42,7 +16,7 @@ def _compute_annd_objective(actual_annd: np.ndarray, target_annd: np.ndarray, we
     Args:
         actual_annd: Array of current ANND values.
         target_annd: Array of target ANND values.
-        weights: Weighting coefficients, usually representing the degree distribution bin sizes.
+        weights: Mantained for compatibility with other methods.
     Returns:
         float: The total weighted objective value.
     """
@@ -160,32 +134,32 @@ def optimizer(
     rng = rng or np.random.default_rng()
     target_annd = np.asarray(target_annd, dtype=float)
     if debug:
-        target_assortativity = calculate_degree_assortativity(initial_graph)
+        target_assortativity = -0.7612
     bins = len(target_annd)
+    weights = np.ones(bins)/bins
 
     # Initialize graph state
-    graph_state = GraphState(initial_graph)
-    initial_annd = graph_state.get_annd(bins=bins)
+    graph_state = GraphState(initial_graph, bins=bins)
+    initial_annd = graph_state.get_annd()
     initial_diameter = graph_state.exact_diameter if target_diameter is not None else None
     initial_ecc_moments = graph_state.ecc_moments if target_ecc_moments is not None else None
     
-    # Compute binned degree distribution for weighting (matches the binning in get_annd)
-    degree_distribution = _get_binned_degree_distribution(graph_state._degrees, bins=bins)
-
     if debug:
-        print(f"{'Degree distribution:':<40} {degree_distribution}")
         print(f"{'Initial ANND:':<40} {initial_annd}")
         print(f"{'Target ANND:':<40} {target_annd}")
+        print(f"{'Initial assortativity:':<40} {calculate_degree_assortativity(initial_graph)}")
+        print(f"{'Target assortativity:':<40} {target_assortativity}")
 
     # Optimization loop parameters
     max_steps = 100 * graph_state.num_edges
-    patience = max(500, int(max_steps * 0.15))
+    patience = max(500, int(max_steps * 0.25))
     steps_without_improvement = 0
     temperature = 1.0
     cooling = 2**(-3/max_steps)
+    good_enough_threshold = 1e-4
 
     # Track metrics
-    current_error = _compute_annd_objective(initial_annd, target_annd, weights=degree_distribution)
+    current_error = _compute_annd_objective(initial_annd, target_annd, weights=weights)
     if target_diameter is not None:
         current_error = 0.9 * current_error + 0.1 * _compute_diameter_objective(initial_diameter, target_diameter)
     if target_ecc_moments is not None:
@@ -203,48 +177,58 @@ def optimizer(
     best_state = {
         "error": current_error,
         "graph_state": graph_state.copy(),
-        "temperature": temperature,
         "step": 0,
         }
-    reset_allowed = True
-    
+
+    if best_state['error'] < good_enough_threshold:
+        if debug: print(f"Early stopping at step 0 - Best error: {best_state['error']:.6f} at step 0")
+        return best_state['graph_state'], best_state['error']
+
     # Main loop
-    for step in range(max_steps):
-        change = _propose_double_edge_swap(graph_state, rng)
-        steps_without_improvement += 1
+    for step in range(1, max_steps):
+        # Local loop to find a valid proposal
+        change = None
+        failed_proposals = 0
+        while change is None:
+            change = _propose_double_edge_swap(graph_state, rng)
+            if change is None:
+                failed_proposals += 1
+                if failed_proposals >= patience:
+                    if debug:
+                        print(f"Aborting: Failed to find a valid proposal after {patience} attempts at step {step}.")
+                    break
         
-        # State transitions without proposals skip evaluations
-        if change is None: 
-            if debug: 
-                errors_history.append(current_error)
-                assortativity_errors_history.append(assortativity_errors_history[-1])
-            if steps_without_improvement >= patience:
-                if debug: print(f"Early stopping at step {step + 1} - Best error: {best_state['error']:.6f} at step {best_state['step']}")
-                break
-            continue
+        if change is None:
+            break
 
         # Propose state change
         graph_state.apply_change(change)
-        proposed_error = _compute_annd_objective(graph_state.get_annd(bins=bins), target_annd, weights=degree_distribution)
+        proposed_error = _compute_annd_objective(graph_state.get_annd(), target_annd, weights=weights)
         if target_diameter is not None:
             proposed_error = 0.9 * proposed_error + 0.1 * _compute_diameter_objective(graph_state.exact_diameter, target_diameter)
         if target_ecc_moments is not None:
             proposed_error = 0.9 * proposed_error + 0.1 * _compute_eccentricity_objective(graph_state.ecc_moments, target_ecc_moments)
 
-        if rng.random() < np.exp((best_state['error'] - proposed_error) / temperature):
-            # accept
+        if proposed_error < best_state['error']:
+            # accept sure improvements
             current_error = proposed_error
-            if current_error < best_state['error']:
-                best_state['error'] = current_error
-                best_state['graph_state'] = graph_state.copy()
-                best_state['temperature'] = temperature
-                best_state['step'] = step
-                steps_without_improvement = 0
-                reset_allowed = True
+            best_state['error'] = current_error
+            best_state['graph_state'] = graph_state.copy()
+            best_state['step'] = step
+            steps_without_improvement = 0
+
+            if best_state['error'] < good_enough_threshold:
+                if debug: print(f"Early stopping at step {step} - Best error: {best_state['error']:.6f} at step {best_state['step']}")
+                break
+        elif rng.random() < np.exp((best_state['error'] - proposed_error) / temperature):
+            # accept non improving steps with probability exp(-delta/T)
+            current_error = proposed_error
+            steps_without_improvement += 1
         else:
             # reject
             graph_state.revert_change(change)
-        
+            steps_without_improvement += 1
+                    
         # Temperature decay
         temperature *= cooling
         
@@ -254,14 +238,8 @@ def optimizer(
             assortativity_errors_history.append(abs(current_assortativity - target_assortativity))
                 
         if steps_without_improvement >= patience:
-            if debug: print(f"Early stopping at step {step + 1} - Best error: {best_state['error']:.6f} at step {best_state['step']}")
+            if debug: print(f"Early stopping at step {step} - Best error: {best_state['error']:.6f} at step {best_state['step']}")
             break
-
-        if steps_without_improvement >= patience * 0.75 and reset_allowed:
-            graph_state = best_state['graph_state'].copy()
-            temperature = min(1.0, best_state['temperature'] * 1.15)
-            current_error = best_state['error']
-            reset_allowed = False
         
     if debug:
         print(f"{'Final ANND error:':<40} {best_state['error']:.6f}")
