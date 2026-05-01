@@ -433,10 +433,9 @@ def calculate_annd_error(
 
     # Weights w(k) = (P1(k) + P2(k)) / 2
     weights = (obtained_annd + p_obtained) * 0.5
-    
-    x = 10.0 * (obtained_annd - target_annd)
-    log_cosh = np.abs(x) - np.log(2.0) + np.log1p(np.exp(-2.0 * np.abs(x)))
-    error = np.dot(weights, log_cosh)
+
+    loss = np.log1p(40 * np.abs(obtained_annd - target_annd)**1.5)
+    error = np.dot(weights, loss)
     
     return float(error)
 

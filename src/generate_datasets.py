@@ -24,7 +24,7 @@ from src.anndg.graph_generator import generate_graph as anndg_generate_graph
 logger = logging.getLogger(__name__)
 
 
-KNOWN_METHODS: frozenset[str] = frozenset({"padma", "pdd", "ergm", "dummyEdges", "dummyNodes", "anndg", "anndgD", "anndgE", "anndgED"})
+KNOWN_METHODS: frozenset[str] = frozenset({"padma", "pdd", "ergm", "dummyEdges", "dummyNodes", "anndg", "anndgD", "anndgE", "anndgED", "nextGen"})
 
 
 def generate_graph(target_stats: dict[str, Any], method: str, rng: np.random.Generator = None) -> nx.Graph:
@@ -46,7 +46,10 @@ def generate_graph(target_stats: dict[str, Any], method: str, rng: np.random.Gen
     if rng is None:
         rng = np.random.default_rng()
 
-    if method == "padma":
+    if method == "nextGen":
+        G_nx, _ = anndg_generate_graph(target_stats, rng)
+        return G_nx
+    elif method == "padma":
         G_nx, _ = padma_generate_graph(target_stats, rng)
         return G_nx
     elif method == "anndg":

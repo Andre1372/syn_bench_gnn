@@ -28,9 +28,10 @@ from notebooks.visualization_utils import plot_performance_distribution, set_dyn
 
 # Cell 1 - Global Variables & Data Loading
 DATASET_NAMES = ["BZR", "DHFR", "Mutagenicity", "MUTAG"]
-METHODS = ["padma", "anndg", "anndgD", "anndgE", "anndgED"]
+METHODS = ["padma", "anndg", "anndgE", "nextGen"]
+IGNORED_METRICS = ["diameter"]
 PALETTE = {
-    # "original": "#5B9BD5", 
+    "nextGen": "#5B9BD5", 
     "dummyNodes": "#DA7CF7",
     "dummyEdges": "#98C379", 
     "padma": "#F5C431", 
@@ -131,8 +132,8 @@ def load_generation_data() -> pd.DataFrame:
                         if isinstance(value, (list, np.ndarray)):
                             for idx, val in enumerate(value):
                                 row[f"{key}_{idx}"] = val
-                    else:
-                        row[key] = value
+                        else:
+                            row[key] = value
                     rows.append(row)
             
     df = pd.DataFrame(rows)
@@ -151,7 +152,7 @@ def compute_generation_errors(df: pd.DataFrame) -> pd.DataFrame:
     # 2. Identify columns to compute deltas for (all stats columns)
     metadata_cols = ["dataset", "method", "graph_idx", "variant_idx", 
                      "deg_moments_error", "annd_error", "ecc_moments_error"]
-    stat_cols = [c for c in df.columns if c not in metadata_cols]
+    stat_cols = [c for c in df.columns if c not in metadata_cols and c not in IGNORED_METRICS]
     
     # 3. Vectorized delta calculation for each statistic
     error_rows = []
@@ -319,6 +320,90 @@ plot_stats = ["modularity", "clustering", "assortativity", "efficiency", "diamet
  "annd_0", "annd_1", "annd_2", "annd_3", "annd_error", 
  "ecc_moments_0", "ecc_moments_1", "ecc_moments_2", "ecc_moments_3", "ecc_moments_error"]
 
-# Usage with pre-calculated df_errors
-analyze_generation_quality("MUTAG", plot_stats)
-get_top_errors("diameter", "MUTAG", "anndg", n=5)
+plot_stats = [s for s in plot_stats if s not in IGNORED_METRICS]
+
+for d in DATASETS:
+    analyze_generation_quality(d, plot_stats)
+    # get_top_errors("assortativity", d, "anndg", n=5)
+
+
+
+# Cell 3 - Global Summary
+def generate_global_summary(df_errs: pd.DataFrame, metrics: list[str]) -> Tuple[pd.DataFrame, pd.Series]:
+    """Generates a summary of errors per dataset/method and computes a global replication score."""
+    valid_metrics = [m for m in metrics if m in df_errs.columns]
+    
+    # 1. Plotting global distributions (aggregated across all datasets)
+    melted_df = df_errs.melt(
+        id_vars=["dataset", "method", "graph_idx", "variant_idx"],
+        value_vars=valid_metrics,
+        var_name="stat",
+        value_name="error"
+    )
+    
+    n_stats = len(valid_metrics)
+    max_cols = 5
+    n_cols = min(n_stats, max_cols)
+    n_rows = (n_stats + n_cols - 1) // n_cols
+    
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(4 * n_cols, 5 * n_rows), squeeze=False)
+    axes_flat = axes.flatten()
+    
+    for i, stat in enumerate(valid_metrics):
+        ax = axes_flat[i]
+        df_stat = melted_df[melted_df["stat"] == stat].dropna(subset=["error"])
+        if df_stat.empty: continue
+
+        present_methods = [m for m in METHODS if m in df_stat["method"].unique()]
+        plot_performance_distribution(
+            ax=ax, df=df_stat, x="method", y="error", hue="method",
+            palette=PALETTE, order=present_methods, hue_order=present_methods
+        )
+        
+        # Set dynamic Y limits based on tightest method
+        method_stats = {}
+        for m in present_methods:
+            m_errors = df_stat[df_stat["method"] == m]["error"].dropna().values
+            if len(m_errors) > 0:
+                method_stats[m] = {"max": np.percentile(m_errors, 100), "data": m_errors}
+        
+        if method_stats:
+            tightest_m = min(method_stats.keys(), key=lambda k: method_stats[k]["max"])
+            set_dynamic_ylim(ax, method_stats[tightest_m]["data"], percentile=100, expansion=1.1)
+        
+        ax.set_title(stat.replace("_", " ").title(), fontsize=12, fontweight='bold')
+        ax.set_ylabel("Abs Error" if i % n_cols == 0 else "")
+        ax.set_xlabel("")
+        ax.set_xticks([])
+        ax.grid(axis='y', linestyle='--', alpha=0.3)
+
+    for j in range(i + 1, n_rows * n_cols): fig.delaxes(axes_flat[j])
+
+    available_methods = [m for m in METHODS if m in df_errs["method"].unique()]
+    legend_patches = [mpatches.Patch(color=PALETTE[m], label=m) for m in available_methods]
+    fig.legend(handles=legend_patches, title="Methods", loc='upper center', 
+               bbox_to_anchor=(0.5, 0.94), ncol=len(available_methods), frameon=False)
+    plt.suptitle("Global Generation Quality (All Datasets)", fontsize=22, fontweight='bold', y=0.99)
+    plt.tight_layout(rect=[0, 0, 1, 0.93])
+    plt.show()
+    
+    # 2. Global Replication Score
+    # Mean error of each method per metric (averaged over all datasets and graphs)
+    method_mean_errors = df_errs.groupby('method', observed=True)[valid_metrics].mean()
+    
+    # Mean error across all methods for each metric
+    metric_means_across_methods = method_mean_errors.mean()
+    
+    # Normalize: E_{m,k} / mu_k
+    # We add a small epsilon to avoid division by zero
+    normalized_errors = method_mean_errors / (metric_means_across_methods + 1e-12)
+    
+    # Final score: mean of normalized errors across all metrics
+    global_scores = normalized_errors.mean(axis=1).rename("Global_Replication_Score").sort_values()
+    
+    print("\n=== Global Replication Score (Lower is better) ===")
+    display(global_scores.to_frame())
+    
+    return summary_df, global_scores
+
+summary_df, global_scores = generate_global_summary(df_errors, plot_stats)

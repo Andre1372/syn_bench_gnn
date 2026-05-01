@@ -69,9 +69,9 @@ def parse_arguments() -> argparse.Namespace:
 
     # GNN training
     parser.add_argument(
-        "--train_original",
+        "--process_original",
         action="store_true",
-        help="Also evaluate GNN on the original (non-synthetic) dataset.",
+        help="Pre-process (and sample) the original dataset even if it exists. Also enables evaluation.",
     )
     parser.add_argument(
         "--epochs",
@@ -180,7 +180,12 @@ def main() -> None:
 
         for dataset_name in args.dataset:
             # Preprocess and save (with optional down-sampling) before generation.
-            preprocess_and_save_original_dataset(dataset_name, project_root / "data", max_size=args.cut_datasets, rng=rng)
+            # Only re-process if explicitly requested or if the file doesn't exist.
+            orig_pt_path = project_root / "data" / dataset_name / f"{dataset_name}_original.pt"
+            if args.process_original or not orig_pt_path.exists():
+                preprocess_and_save_original_dataset(dataset_name, project_root / "data", max_size=args.cut_datasets, rng=rng)
+            else:
+                logger.info(f"Using existing original dataset for {dataset_name} (skip re-processing).")
 
             for method in args.methods:
                 logger.info(f"--- Generating: dataset={dataset_name}  method={method} ---")
@@ -246,7 +251,7 @@ def main() -> None:
         split_indices = get_split_indices(original_data_list, seed=42)
 
         # Optionally evaluate on original dataset and save the baseline CSV
-        if args.train_original:
+        if args.process_original:
             logger.info(f"Evaluating original dataset ({dataset_name})...")
             
             # Match the total number of runs used across all synthetic variants (R * V)

@@ -37,16 +37,7 @@ def _get_binned_degree_distribution(degrees: np.ndarray, bins: int) -> np.ndarra
 
 def _compute_annd_objective(actual_annd: np.ndarray, target_annd: np.ndarray, weights: np.ndarray) -> float:
     """
-    Calculates the weighted Log-Cosh loss between actual and target ANND profiles.
-
-    The Log-Cosh objective function serves as a smooth, robust alternative to 
-    Mean Squared Error (MSE).
-
-    Formula:
-        loss = Σ w_i * log(cosh(10 * (actual_i - target_i)))
-
-    Numerical stability is ensured via the identity: 
-        log(cosh(x)) = |x| - log(2) + log(1 + exp(-2|x|)).
+    Calculates the weighted loss between actual and target ANND profiles.
 
     Args:
         actual_annd: Array of current ANND values.
@@ -55,9 +46,8 @@ def _compute_annd_objective(actual_annd: np.ndarray, target_annd: np.ndarray, we
     Returns:
         float: The total weighted objective value.
     """
-    x = 10.0 * (actual_annd - target_annd)
-    log_cosh = np.abs(x) - np.log(2.0) + np.log1p(np.exp(-2.0 * np.abs(x)))
-    error = np.dot(weights, log_cosh)
+    loss = np.log1p(40 * np.abs(actual_annd - target_annd)**1.5)
+    error = np.dot(weights, loss)
     
     return float(error)
 
@@ -104,12 +94,12 @@ def _compute_eccentricity_objective(actual_ecc_moments: np.ndarray, target_ecc_m
     # Skewness loss (evaluated only when variance is stable)
     if k > 2 and var_actual > 1e-12:
         skew_actual, skew_target = actual_ecc_moments[2], target_ecc_moments[2]
-        moment_losses[2] = _compute_metric_loss(skew_actual, skew_target)
+        moment_losses[2] = 0.5*_compute_metric_loss(skew_actual, skew_target)
         
     # Kurtosis loss
     if k > 3:
         kurt_actual, kurt_target = actual_ecc_moments[3], target_ecc_moments[3]
-        moment_losses[3] = _compute_metric_loss(kurt_actual, kurt_target)
+        moment_losses[3] = 0.5*_compute_metric_loss(kurt_actual, kurt_target)
             
     penalty = float(np.mean(moment_losses ** 2.0) ** 0.5)
     
@@ -188,18 +178,18 @@ def optimizer(
         print(f"{'Target ANND:':<40} {target_annd}")
 
     # Optimization loop parameters
-    max_steps = 10000
-    patience = 500
+    max_steps = 100 * graph_state.num_edges
+    patience = max(500, int(max_steps * 0.15))
     steps_without_improvement = 0
     temperature = 1.0
-    cooling = 10**(-3/max_steps) #0.998
+    cooling = 2**(-3/max_steps)
 
     # Track metrics
     current_error = _compute_annd_objective(initial_annd, target_annd, weights=degree_distribution)
     if target_diameter is not None:
         current_error = 0.9 * current_error + 0.1 * _compute_diameter_objective(initial_diameter, target_diameter)
     if target_ecc_moments is not None:
-        current_error = 0.7 * current_error + 0.3 * _compute_eccentricity_objective(initial_ecc_moments, target_ecc_moments)
+        current_error = 0.9 * current_error + 0.1 * _compute_eccentricity_objective(initial_ecc_moments, target_ecc_moments)
     
     errors_history = [current_error] if debug else []
     assortativity_errors_history = []
@@ -239,7 +229,7 @@ def optimizer(
         if target_diameter is not None:
             proposed_error = 0.9 * proposed_error + 0.1 * _compute_diameter_objective(graph_state.exact_diameter, target_diameter)
         if target_ecc_moments is not None:
-            proposed_error = 0.7 * proposed_error + 0.3 * _compute_eccentricity_objective(graph_state.ecc_moments, target_ecc_moments)
+            proposed_error = 0.9 * proposed_error + 0.1 * _compute_eccentricity_objective(graph_state.ecc_moments, target_ecc_moments)
 
         if rng.random() < np.exp((best_state['error'] - proposed_error) / temperature):
             # accept
