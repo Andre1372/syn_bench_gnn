@@ -83,11 +83,6 @@ class GraphState:
         return int(calculate_diameter(self.get_graph()))
 
     @property
-    def ecc_moments(self) -> np.ndarray:
-        """Calculates the first 4 moments of the graph's eccentricity distribution."""
-        return calculate_eccentricity_moments(self.get_graph(), k=4)
-
-    @property
     def approximate_diameter(self) -> int:
         """
         Returns the approximate diameter of the graph using a two-sweep BFS.
@@ -202,7 +197,7 @@ class GraphState:
 
     def get_annd(self) -> np.ndarray:
         """
-        Computes the Average Nearest Neighbor Degree (ANND) of the graph, normalizes it and bins it into percentiles.
+        Computes the Average Nearest Neighbor Degree (ANND) for each node in the graph, normalizes it and bins it into percentiles.
         """
         if self._num_nodes == 0: return np.zeros(self._bins, dtype=float)
         if self._num_active_nodes <= 1: return np.zeros(self._bins, dtype=float)
@@ -214,6 +209,23 @@ class GraphState:
         # Calculate mean for each fixed group of nodes using pre-calculated indices
         return np.array([
             annd_raw[indices].mean() / norm_factor if indices.size > 0 else 0.0 
+            for indices in self._bin_indices
+        ], dtype=float)
+
+    def get_eccentricity(self) -> np.ndarray:
+        """
+        Computes the eccentriciy value for each node in the graph, normalizes it and bins it into percentiles.
+        """
+        if self._num_nodes == 0: return np.zeros(self._bins, dtype=float)
+        if self._num_active_nodes <= 1: return np.zeros(self._bins, dtype=float)
+        
+        eccentricities = self.get_graph().eccentricity()
+        ecc_raw = np.array(eccentricities, dtype=float)
+        norm_factor = (self._num_active_nodes - 1)
+
+        # Calculate mean for each fixed group of nodes using pre-calculated indices
+        return np.array([
+            ecc_raw[indices].mean() / norm_factor if indices.size > 0 else 0.0 
             for indices in self._bin_indices
         ], dtype=float)
 

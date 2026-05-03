@@ -72,7 +72,7 @@ def plot_annd(
             return
         # Convert to igraph to use the shared analysis logic
         ig_graph = networkx_to_igraph(graph)
-        annd_values = calculate_annd(ig_graph, bins=bins)
+        annd_values, _ = calculate_annd(ig_graph, bins=bins)
     
     if len(annd_values) == 0:
         return
@@ -83,7 +83,7 @@ def plot_annd(
     # Plot target graph first if provided (in background)
     if target_graph is not None:
         ig_target = networkx_to_igraph(target_graph)
-        target_values = calculate_annd(ig_target, bins=bins)
+        target_values, _ = calculate_annd(ig_target, bins=bins)
         
         # Plot target in red
         ax.plot(x_axis, target_values, color='#dc2626', linestyle='--', linewidth=2, alpha=0.8, 

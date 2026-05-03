@@ -102,8 +102,8 @@ def analyze_single_graph(graph: ig.Graph) -> dict[str, float]:
     assortativity = calculate_degree_assortativity(graph)
     efficiency = calculate_global_efficiency(graph)
     diameter = calculate_diameter(graph)
-    annd = calculate_annd(graph)
-    ecc_moments = calculate_eccentricity_moments(graph, k=4)
+    annd, bin_indices = calculate_annd(graph)
+    eccentricity, _ = calculate_eccentricity(graph, bin_indices=bin_indices)
 
     stats_dict: dict[str, float] = {
         "n_nodes": int(graph.vcount()),
@@ -113,9 +113,9 @@ def analyze_single_graph(graph: ig.Graph) -> dict[str, float]:
         "assortativity": assortativity,
         "efficiency": efficiency,
         "diameter": diameter,
-        "annd": annd,
         "normalized_degree_moments": deg_moments,
-        "ecc_moments": ecc_moments
+        "annd": annd,
+        "eccentricity": eccentricity,
     }
 
     # for i, val in enumerate(motifs):
@@ -155,9 +155,9 @@ def count_deg_moments(graph: ig.Graph) -> np.ndarray:
     return np.array([m1, m2, m3, m4])
 
 
-def calculate_annd(graph: ig.Graph, bins: int = 4, compute_variances: bool = False) -> np.ndarray:
+def calculate_annd(graph: ig.Graph, bins: int = 4, bin_indices: list[np.ndarray] | None = None) -> tuple[np.ndarray, list[np.ndarray]]:
     """
-    Computes the Average Nearest Neighbor Degree (ANND) of the graph, normalizes it and bins it into percentiles.
+    Computes the Average Nearest Neighbor Degree (ANND) for each node in the graph, normalizes it and bins it into percentiles.
 
     ANND characterizes degree-degree correlations. The function normalizes neighbor degrees 
     by the maximum possible degree (N-1) and aggregates nodes into 'bins' percentile groups 
@@ -166,76 +166,116 @@ def calculate_annd(graph: ig.Graph, bins: int = 4, compute_variances: bool = Fal
     Args:
         graph: The igraph.Graph object to analyze.
         bins: The number of percentile bins to aggregate into.
+        bin_indices: Optional pre-calculated list of node indices per bin.
     Returns:
-        np.ndarray: Array of length `bins` containing the mean normalized ANND per bin.
+        tuple[np.ndarray, list[np.ndarray]]: 
+            - Array of length `bins` containing the mean normalized ANND per bin.
+            - List containing for each bin the indices of the active nodes associated with that bin.
     """
     n_nodes = graph.vcount()
     if n_nodes == 0:
-        return np.zeros(bins, dtype=float)
+        return np.zeros(bins, dtype=float), bin_indices if bin_indices is not None else [np.array([], dtype=int)] * bins
 
     knn_nodes, _ = graph.knn()
     
     if not knn_nodes:
-        return np.zeros(bins, dtype=float)
+        return np.zeros(bins, dtype=float), bin_indices if bin_indices is not None else [np.array([], dtype=int)] * bins
 
-    node_degrees = np.array(graph.degree(), dtype=int)
-    n_active = np.count_nonzero(node_degrees)
+    if bin_indices is None:
+        node_degrees = np.array(graph.degree(), dtype=int)
+        n_active = np.count_nonzero(node_degrees)
 
-    if n_active <= 1:
-        return np.zeros(bins, dtype=float)
+        if n_active <= 1:
+            return np.zeros(bins, dtype=float), [np.array([], dtype=int)] * bins
 
-    if n_active == n_nodes:
-        # Fast-path: no isolated nodes, no masking needed
-        annd_norm = np.array(knn_nodes, dtype=float) / (n_nodes - 1)
-        sorted_annd = annd_norm[np.argsort(node_degrees)]
+        if n_active == n_nodes:
+            # Fast-path: all nodes are active
+            fixed_active_indices = np.argsort(node_degrees)
+        else:
+            # Consider only active nodes
+            active_mask = node_degrees > 0
+            active_indices = np.where(active_mask)[0]
+            # Sort active indices by their degree
+            fixed_active_indices = active_indices[np.argsort(node_degrees[active_mask])]
+        
+        # Partition using array_split to handle non-divisible N_active gracefully
+        bin_indices = np.array_split(fixed_active_indices, bins)
     else:
-        # Consider only active nodes
-        active_mask = node_degrees > 0
-        annd_active = np.array(knn_nodes, dtype=float)[active_mask]
-        degrees_active = node_degrees[active_mask]
-        annd_norm = annd_active / (n_active - 1)
-        sorted_annd = annd_norm[np.argsort(degrees_active)]
+        # If provided, we assume it already contains indices of nodes with degree >= 1
+        n_active = sum(len(b) for b in bin_indices)
 
-    # Partition and average using array_split to handle non-divisible N_nodes gracefully
-    return np.array([
-        group.mean() if group.size > 0 else 0.0 
-        for group in np.array_split(sorted_annd, bins)
+        if n_active <= 1:
+            return np.zeros(bins, dtype=float), bin_indices
+
+    annd_raw = np.array(knn_nodes, dtype=float)
+    norm_factor = (n_active - 1)
+
+    # Calculate mean for each group of nodes using indices
+    annd_bins = np.array([
+        annd_raw[indices].mean() / norm_factor if indices.size > 0 else 0.0 
+        for indices in bin_indices
     ], dtype=float)
 
+    return annd_bins, bin_indices
 
-def calculate_eccentricity_moments(graph: ig.Graph, k: int = 4) -> np.ndarray:
-    """Calculates the raw eccentricity moments of the graph.
-    
+
+def calculate_eccentricity(graph: ig.Graph, bins: int = 4, bin_indices: list[np.ndarray] | None = None) -> tuple[np.ndarray, list[np.ndarray]]:
+    """
+    Computes the eccentriciy value for each node in the graph, normalizes it and bins it into percentiles.
+
     Eccentricity is the maximum shortest path distance from a node to any 
     other node in the graph: e(u) = max_{v \in V} d(u, v). 
-        
+
     Args:
-        graph: The input igraph.Graph object.
-        k: The number of moments to calculate. Must be strictly positive.
+        graph: The igraph.Graph object to analyze.
+        bins: The number of percentile bins to aggregate into.
+        bin_indices: Optional pre-calculated list of node indices per bin.
     Returns:
-        An array of length `k` containing the eccentricity moments.        
-    Raises:
-        ValueError: If `k` is less than 1 or greater than 4.
+        tuple[np.ndarray, list[np.ndarray]]: 
+            - Array of length `bins` containing the mean normalized eccentricity per bin.
+            - List containing for each bin the indices of the nodes associated with that bin.
     """
-    if k < 1 or k > 4: raise ValueError(f"Number of moments 'k' must be between 1 and 4, got {k}.")
-    
-    n = graph.vcount()
-    if n == 0: return np.zeros(k, dtype=np.float64)
+    n_nodes = graph.vcount()
+    if n_nodes == 0:
+        return np.zeros(bins, dtype=float), bin_indices if bin_indices is not None else [np.array([], dtype=int)] * bins
 
-    # Leverage igraph's highly optimized C backend for shortest path calculations
-    eccentricities = np.array(graph.eccentricity(), dtype=np.float64)
+    eccentricities = graph.eccentricity()
+    if bin_indices is None:
+        node_degrees = np.array(graph.degree(), dtype=int)
+        n_active = np.count_nonzero(node_degrees)
 
-    m1 = float(np.mean(eccentricities))
-    m2 = float(np.var(eccentricities, ddof=0))
+        if n_active <= 1:
+            return np.zeros(bins, dtype=float), [np.array([], dtype=int)] * bins
 
-    if m2 > 1e-10:
-        m3 = float(stats.skew(eccentricities, bias=False))
-        m4 = float(stats.kurtosis(eccentricities, bias=False)) + 3.0
+        if n_active == n_nodes:
+            # Fast-path: all nodes are active
+            fixed_active_indices = np.argsort(node_degrees)
+        else:
+            # Consider only active nodes
+            active_mask = node_degrees > 0
+            active_indices = np.where(active_mask)[0]
+            # Sort active indices by their degree
+            fixed_active_indices = active_indices[np.argsort(node_degrees[active_mask])]
+        
+        # Partition using array_split to handle non-divisible N_active gracefully
+        bin_indices = np.array_split(fixed_active_indices, bins)
     else:
-        m3 = 0.0
-        m4 = 3.0
+        # If provided, we assume it already contains indices of nodes with degree >= 1
+        n_active = sum(len(b) for b in bin_indices)
 
-    return np.array([m1, m2, m3, m4])[:k]
+        if n_active <= 1:
+            return np.zeros(bins, dtype=float), bin_indices
+
+    ecc_raw = np.array(eccentricities, dtype=float)
+    norm_factor = (n_active - 1)
+
+    # Calculate mean for each group of nodes using indices
+    ecc_bins = np.array([
+        ecc_raw[indices].mean() / norm_factor if indices.size > 0 else 0.0 
+        for indices in bin_indices
+    ], dtype=float)
+
+    return ecc_bins, bin_indices
 
 
 def count_motifs(graph: ig.Graph, k: int, sampling_probs: list[float] | None = None) -> np.ndarray:
@@ -441,48 +481,16 @@ def calculate_annd_error(obtained_annd: np.ndarray, target_annd: np.ndarray) -> 
     return float(error)
 
 
-def calculate_eccentricity_error(obtained_ecc_moments: np.ndarray, target_ecc_moments: np.ndarray) -> float:
-    """Calculates the structural error between obtained eccentricity moments and target eccentricity moments.
+def calculate_eccentricity_error(obtained_ecc: np.ndarray, target_ecc: np.ndarray) -> float:
+    """Calculates the structural error between obtained eccentricity and target eccentricity.
     
     Args:
-        obtained_ecc_moments: NumPy array of obtained eccentricity moments.
-        target_ecc_moments: NumPy array of target eccentricity moments.
+        obtained_ecc: NumPy array of obtained eccentricity values.
+        target_ecc: NumPy array of target eccentricity values.
     Returns:
-        A scalar error value representing the discrepancy in eccentricity moments.
+        A scalar error value representing the discrepancy in eccentricity.
     """    
-    k = len(target_ecc_moments)
-    if k < 1: raise ValueError("Target eccentricity moments must have at least one element.")
-    if len(obtained_ecc_moments) != k:
-        raise ValueError("Obtained and target eccentricity moments must have the same length.")
+    loss = np.log1p(40 * np.abs(obtained_ecc - target_ecc)**1.5)
+    error = np.mean(loss)
     
-    moment_losses = np.zeros(k)
-
-    def _compute_metric_loss(actual_value, target_value):
-        a = np.arcsinh(actual_value)
-        b = np.arcsinh(target_value)
-        loss = np.abs(a - b)**1.5
-
-        return loss
-
-    # Mean loss
-    mean_actual, mean_target = obtained_ecc_moments[0], target_ecc_moments[0]
-    moment_losses[0] = _compute_metric_loss(mean_actual, mean_target)
-    
-    # Variance loss
-    if k > 1:
-        var_actual, var_target = obtained_ecc_moments[1], target_ecc_moments[1]
-        moment_losses[1] = _compute_metric_loss(var_actual, var_target)
-    
-    # Skewness loss (evaluated only when variance is stable)
-    if k > 2 and var_actual > 1e-12:
-        skew_actual, skew_target = obtained_ecc_moments[2], target_ecc_moments[2]
-        moment_losses[2] = _compute_metric_loss(skew_actual, skew_target)
-        
-    # Kurtosis loss
-    if k > 3:
-        kurt_actual, kurt_target = obtained_ecc_moments[3], target_ecc_moments[3]
-        moment_losses[3] = _compute_metric_loss(kurt_actual, kurt_target)
-            
-    penalty = float(np.mean(moment_losses ** 2.0) ** 0.5)
-    
-    return penalty
+    return float(error)

@@ -20,7 +20,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.data_utils import pytorch_to_networkx, networkx_to_igraph, DatasetPT
-from src.graph_analysis import analyze_single_graph, calculate_annd_error
+from src.graph_analysis import analyze_single_graph, calculate_annd_error, calculate_moments_error
 from notebooks.visualization_utils import plot_graph, plot_annd
 from src.anndg.graph_generator import generate_graph
 
@@ -90,9 +90,6 @@ print(f"{'ANND Bin 1':<25} | {target_stats['annd'][1]:>12.4f} | {info['best_annd
 print(f"{'ANND Bin 2':<25} | {target_stats['annd'][2]:>12.4f} | {info['best_annd'][2]:>12.4f} | {abs(target_stats['annd'][2] - info['best_annd'][2]):>10.4f}")
 print(f"{'ANND Bin 3':<25} | {target_stats['annd'][3]:>12.4f} | {info['best_annd'][3]:>12.4f} | {abs(target_stats['annd'][3] - info['best_annd'][3]):>10.4f}")
 print("-" * 70)
-
-# Structural error computation
-from src.graph_analysis import calculate_moments_error
 
 annd_error = calculate_annd_error(info['best_annd'], target_stats['annd'])
 moments_error = calculate_moments_error(target_stats['normalized_degree_moments'], obtained_stats['normalized_degree_moments'])

@@ -50,8 +50,8 @@ def load_generation_data() -> pd.DataFrame:
         """Extracts stats as numpy arrays for error calculation."""
         deg_moments = np.array(stats.get("normalized_degree_moments", [0]*4))
         annd = np.array(stats.get("annd", [0]*4))
-        ecc_moments = np.array(stats.get("ecc_moments", [0]*4))
-        return deg_moments, annd, ecc_moments
+        eccentricity = np.array(stats.get("eccentricity", [0]*4))
+        return deg_moments, annd, eccentricity
 
     for dataset_name in DATASET_NAMES:
         # Load original
@@ -60,11 +60,11 @@ def load_generation_data() -> pd.DataFrame:
             dataset_obj = DatasetPT(orig_pt_path)
             per_graph_stats = dataset_obj.metadata.get("per_graph_statistics", [])
             for i, stats in enumerate(per_graph_stats):
-                deg_moments, annd, ecc_moments = extract_errors(stats)
+                deg_moments, annd, eccentricity = extract_errors(stats)
                 original_stats_map[(dataset_name, i)] = {
                     "deg_moments": deg_moments,
                     "annd": annd,
-                    "ecc_moments": ecc_moments,
+                    "eccentricity": eccentricity,
                 }
                 
                 row = {
@@ -75,7 +75,7 @@ def load_generation_data() -> pd.DataFrame:
                     "seed": pd.NA,
                     "deg_moments_error": 0.0,
                     "annd_error": 0.0,
-                    "ecc_moments_error": 0.0,
+                    "eccentricity_error": 0.0,
                 }
                 # Flatten the stats dictionary
                 for key, value in stats.items():
@@ -103,11 +103,11 @@ def load_generation_data() -> pd.DataFrame:
                     # Get target stats
                     orig = original_stats_map.get((dataset_name, i))
                     if orig:
-                        deg_moments, annd, ecc_moments = extract_errors(stats)
+                        deg_moments, annd, eccentricity = extract_errors(stats)
                         
                         dm_err = calculate_moments_error(deg_moments, orig["deg_moments"])
                         annd_err = calculate_annd_error(annd, orig["annd"])
-                        ecc_err = calculate_eccentricity_error(ecc_moments, orig["ecc_moments"])
+                        ecc_err = calculate_eccentricity_error(eccentricity, orig["eccentricity"])
                     else:
                         dm_err = annd_err = ecc_err = np.nan
 
@@ -118,7 +118,7 @@ def load_generation_data() -> pd.DataFrame:
                         "variant_idx": v_idx,
                         "deg_moments_error": dm_err,
                         "annd_error": annd_err,
-                        "ecc_moments_error": ecc_err,
+                        "eccentricity_error": ecc_err,
                         "seed": seeds[i] if i < len(seeds) else pd.NA,
                     }
                     # Flatten the stats dictionary
@@ -147,7 +147,7 @@ def compute_generation_errors(df: pd.DataFrame) -> pd.DataFrame:
     
     # 2. Identify columns to compute deltas for (all stats columns)
     metadata_cols = ["dataset", "method", "graph_idx", "variant_idx", "seed",
-                     "deg_moments_error", "annd_error", "ecc_moments_error"]
+                     "deg_moments_error", "annd_error", "eccentricity_error"]
     stat_cols = [c for c in df.columns if c not in metadata_cols and c not in IGNORED_METRICS]
     
     # 3. Vectorized delta calculation for each statistic
@@ -167,7 +167,7 @@ def compute_generation_errors(df: pd.DataFrame) -> pd.DataFrame:
                 "seed": synth_row.get("seed", np.nan),
                 "deg_moments_error": synth_row["deg_moments_error"],
                 "annd_error": synth_row["annd_error"],
-                "ecc_moments_error": synth_row["ecc_moments_error"]
+                "eccentricity_error": synth_row["eccentricity_error"]
             }
             # Compute absolute delta for each topological statistic
             for col in stat_cols:
@@ -318,13 +318,13 @@ def get_top_errors(metric: str, dataset_name: str, method_name: str, n: int = 5)
 plot_stats = ["modularity", "clustering", "assortativity", "efficiency", "diameter",  
  "normalized_degree_moments_0", "normalized_degree_moments_1", "normalized_degree_moments_2", "normalized_degree_moments_3", "deg_moments_error", 
  "annd_0", "annd_1", "annd_2", "annd_3", "annd_error", 
- "ecc_moments_0", "ecc_moments_1", "ecc_moments_2", "ecc_moments_3", "ecc_moments_error"]
+ "eccentricity_0", "eccentricity_1", "eccentricity_2", "eccentricity_3", "eccentricity_error"]
 
 plot_stats = [s for s in plot_stats if s not in IGNORED_METRICS]
 
 for d in DATASETS:
     analyze_generation_quality(d, plot_stats)
-    # get_top_errors("assortativity", d, "anndg", n=5)
+    get_top_errors("assortativity", d, "anndg", n=5)
 
 
 

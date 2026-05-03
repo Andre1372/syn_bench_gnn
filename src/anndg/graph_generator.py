@@ -20,7 +20,7 @@ from src.anndg.optimizer import optimizer
 def generate_graph(
     target_stats: dict[str, Any], 
     replicate_diameter: bool = False, 
-    replicate_ecc_moments: bool = False,
+    replicate_eccentricity: bool = False,
     rng: np.random.Generator = None,
     debug: bool = False
 ) -> tuple[nx.Graph, dict]:
@@ -40,12 +40,12 @@ def generate_graph(
     nx_graph, info = padma_generate_graph(target_stats, rng)
 
     target_diameter = target_stats["diameter"] if replicate_diameter else None
-    target_ecc_moments = target_stats["ecc_moments"] if replicate_ecc_moments else None    
+    target_eccentricity = target_stats["eccentricity"] if replicate_eccentricity else None    
     best_graph, opt_info = optimizer(
         networkx_to_igraph(nx_graph), 
         target_stats["annd"], 
         target_diameter=target_diameter, 
-        target_ecc_moments=target_ecc_moments,
+        target_eccentricity=target_eccentricity,
         rng=rng,
         debug=debug
     )

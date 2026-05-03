@@ -55,9 +55,9 @@ def generate_graph(target_stats: dict[str, Any], method: str, rng: np.random.Gen
     elif method == "anndgD":
         return anndg_generate_graph(target_stats, replicate_diameter=True, rng=rng)
     elif method == "anndgE":
-        return anndg_generate_graph(target_stats, replicate_ecc_moments=True, rng=rng)
+        return anndg_generate_graph(target_stats, replicate_eccentricity=True, rng=rng)
     elif method == "anndgED":
-        return anndg_generate_graph(target_stats, replicate_ecc_moments=True, replicate_diameter=True, rng=rng)
+        return anndg_generate_graph(target_stats, replicate_eccentricity=True, replicate_diameter=True, rng=rng)
     elif method == "pdd":
         if "observed_nx" not in target_stats: raise ValueError("Method 'pdd' requires 'observed_nx' in target_stats.")
         
@@ -286,7 +286,7 @@ def generate_synthetic_variants(
         for info in infos:
             mapped = {}
             if "best_annd" in info: mapped["annd"] = info["best_annd"]
-            if "best_ecc_moments" in info: mapped["ecc_moments"] = info["best_ecc_moments"]
+            if "best_eccentricity" in info: mapped["eccentricity"] = info["best_eccentricity"]
             if "best_diameter" in info: mapped["diameter"] = info["best_diameter"]
             precomputed_stats.append(mapped)
 
