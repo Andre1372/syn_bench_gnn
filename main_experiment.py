@@ -182,7 +182,10 @@ def main() -> None:
             # Preprocess and save (with optional down-sampling) before generation.
             # Only re-process if explicitly requested or if the file doesn't exist.
             orig_pt_path = project_root / "data" / dataset_name / f"{dataset_name}_original.pt"
-            if args.process_original or not orig_pt_path.exists():
+            if not orig_pt_path.exists():
+                args.process_original = True
+                logger.info(f"Dataset {dataset_name} not found, enabling --process_original.")
+            if args.process_original:
                 preprocess_and_save_original_dataset(dataset_name, project_root / "data", max_size=args.cut_datasets, rng=rng)
             else:
                 logger.info(f"Using existing original dataset for {dataset_name} (skip re-processing).")

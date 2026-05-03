@@ -112,6 +112,65 @@ def _propose_double_edge_swap(graph_state: GraphState, rng: np.random.Generator)
     )
 
 
+def _propose_intelligent_double_edge_swap(
+    graph_state: GraphState, 
+    current_annd: np.ndarray,
+    target_annd: np.ndarray,
+    rng: np.random.Generator
+) -> GraphChange | None:
+    """Propose an intelligent degree-preserving double edge swap."""
+    if graph_state.num_edges < 2:
+        return None
+
+    # --- PART 1: Sample the first edge (u, v) ---
+    # Prioritize the bin with the highest error
+    bins_errors = np.abs(current_annd - target_annd)
+    sorted_bins = np.argsort(bins_errors)[::-1]
+    for b in sorted_bins:
+        # If it is the last take it for sure
+        if b == sorted_bins[-1]:
+            bin_idx = b
+            break
+        # Otherwise take it with probability 0.75
+        if rng.random() < 0.75:
+            bin_idx = b
+            break
+    
+    u = graph_state.get_random_node_from_bin(bin_idx, rng, current_value=current_annd[bin_idx], target_value=target_annd[bin_idx])
+    if u is not None:
+        # Sample a neighbor v to form the edge (u, v)
+        neighbors_u = list(graph_state.neighbors(u))
+        v = int(rng.choice(neighbors_u)) if neighbors_u else None
+
+    # Fallback: if bin sampling failed, pick a completely random edge
+    if u is None or v is None:
+        u, v = graph_state.get_random_edge(rng)
+        
+    # --- PART 2: Sample the second edge (x, y) ---
+    x, y = graph_state.get_random_edge(rng)
+
+    # --- PART 3: Validity Checks and Proposal Building ---
+    # Check 1: All nodes must be distinct to prevent self-loops and multi-edges
+    if len({u, v, x, y}) != 4:
+        return None
+
+    # Randomly choose between the two possible swap configurations
+    if rng.integers(0, 2) == 0:
+        proposed_edges = [(u, y), (x, v)]
+    else:
+        proposed_edges = [(u, x), (v, y)]
+
+    # Check 2: The new edges must not already exist in the graph
+    for a, b in proposed_edges:
+        if graph_state.has_edge(a, b):
+            return None
+
+    return GraphChange(
+        edges_to_add=proposed_edges,
+        edges_to_remove=[(u, v), (x, y)]
+    )
+
+
 def optimizer(
     initial_graph: ig.Graph, 
     target_annd: np.ndarray, 
@@ -134,7 +193,7 @@ def optimizer(
     rng = rng or np.random.default_rng()
     target_annd = np.asarray(target_annd, dtype=float)
     if debug:
-        target_assortativity = -0.7612
+        target_assortativity = -0.6963
     bins = len(target_annd)
     weights = np.ones(bins)/bins
 
@@ -186,11 +245,13 @@ def optimizer(
 
     # Main loop
     for step in range(1, max_steps):
+        current_annd = graph_state.get_annd()
+
         # Local loop to find a valid proposal
         change = None
         failed_proposals = 0
         while change is None:
-            change = _propose_double_edge_swap(graph_state, rng)
+            change = _propose_intelligent_double_edge_swap(graph_state, current_annd, target_annd, rng)
             if change is None:
                 failed_proposals += 1
                 if failed_proposals >= patience:
@@ -203,7 +264,7 @@ def optimizer(
 
         # Propose state change
         graph_state.apply_change(change)
-        proposed_error = _compute_annd_objective(graph_state.get_annd(), target_annd, weights=weights)
+        proposed_error = _compute_annd_objective(current_annd, target_annd, weights=weights)
         if target_diameter is not None:
             proposed_error = 0.9 * proposed_error + 0.1 * _compute_diameter_objective(graph_state.exact_diameter, target_diameter)
         if target_ecc_moments is not None:
@@ -216,10 +277,6 @@ def optimizer(
             best_state['graph_state'] = graph_state.copy()
             best_state['step'] = step
             steps_without_improvement = 0
-
-            if best_state['error'] < good_enough_threshold:
-                if debug: print(f"Early stopping at step {step} - Best error: {best_state['error']:.6f} at step {best_state['step']}")
-                break
         elif rng.random() < np.exp((best_state['error'] - proposed_error) / temperature):
             # accept non improving steps with probability exp(-delta/T)
             current_error = proposed_error
@@ -238,6 +295,10 @@ def optimizer(
             assortativity_errors_history.append(abs(current_assortativity - target_assortativity))
                 
         if steps_without_improvement >= patience:
+            if debug: print(f"Early stopping at step {step} - Best error: {best_state['error']:.6f} at step {best_state['step']}")
+            break
+
+        if best_state['error'] < good_enough_threshold:
             if debug: print(f"Early stopping at step {step} - Best error: {best_state['error']:.6f} at step {best_state['step']}")
             break
         

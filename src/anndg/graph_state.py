@@ -65,9 +65,7 @@ class GraphState:
             self._fixed_active_indices = np.array([], dtype=int)
         
         self._bins = bins
-        self._bin_indices_cache: dict[int, list[np.ndarray]] = {}
-        if self._num_active_nodes > 0:
-            self._bin_indices_cache[bins] = np.array_split(self._fixed_active_indices, bins)
+        self._bin_indices = np.array_split(self._fixed_active_indices, bins)
 
     @property
     def num_nodes(self) -> int:
@@ -154,6 +152,54 @@ class GraphState:
         idx = rng.integers(0, len(self._edges))
         return self._edges[idx]
 
+    def get_random_node_from_bin(
+        self, 
+        bin_idx: int, 
+        rng: np.random.Generator,
+        current_value: float | None = None,
+        target_value: float | None = None
+    ) -> int | None:
+        """
+        Samples a node from a specific bin in O(1) time, with optional KNN-based filtering.
+
+        Args:
+            bin_idx: The index of the bin to sample from.
+            rng: The random number generator to use.
+            current_value: Current ANND value for this bin (normalized).
+            target_value: Target ANND value for this bin (normalized).
+        Returns:
+            The index of the sampled node, or None if the bin is empty or no node satisfies the condition.
+        Raises:
+            ValueError: If the bin index is out of range.
+        """
+        if bin_idx < 0 or bin_idx >= self._bins:
+            raise ValueError(f"Bin index {bin_idx} out of range [0, {self._bins}).")
+
+        bin_nodes = self._bin_indices[bin_idx]
+        
+        # Apply conditional filtering if parameters are provided
+        if current_value is not None and target_value is not None:
+            knn_nodes, _ = self.get_graph().knn()
+            knn_raw = np.array(knn_nodes, dtype=float)
+            norm_factor = (self._num_active_nodes - 1)
+            if norm_factor > 0:
+                # Calculate normalized KNN for nodes in this bin
+                bin_knn = knn_raw[bin_nodes] / norm_factor
+                if current_value < target_value:
+                    # current < target -> we want to sample nodes that are pull the average down
+                    mask = bin_knn <= current_value
+                else:
+                    # current > target -> we want to sample nodes that are pull the average up
+                    mask = bin_knn >= current_value
+                
+                bin_nodes = bin_nodes[mask]
+
+        if bin_nodes.size == 0:
+            return None
+
+        idx = rng.integers(0, bin_nodes.size)
+        return int(bin_nodes[idx])
+
     def get_annd(self) -> np.ndarray:
         """
         Computes the Average Nearest Neighbor Degree (ANND) of the graph, normalizes it and bins it into percentiles.
@@ -168,7 +214,7 @@ class GraphState:
         # Calculate mean for each fixed group of nodes using pre-calculated indices
         return np.array([
             annd_raw[indices].mean() / norm_factor if indices.size > 0 else 0.0 
-            for indices in self._bin_indices_cache[self._bins]
+            for indices in self._bin_indices
         ], dtype=float)
 
     def copy(self) -> 'GraphState':
@@ -184,7 +230,7 @@ class GraphState:
         new_state._num_active_nodes = self._num_active_nodes
         new_state._fixed_active_indices = self._fixed_active_indices.copy()
         new_state._bins = self._bins
-        new_state._bin_indices_cache = {k: [idx.copy() for idx in v] for k, v in self._bin_indices_cache.items()}
+        new_state._bin_indices = [idx.copy() for idx in self._bin_indices]
         return new_state
 
     def apply_change(self, change: GraphChange) -> None:
@@ -216,7 +262,7 @@ class GraphState:
             edge = (u, v) if u < v else (v, u)
             self._edge_to_idx[edge] = len(self._edges)
             self._edges.append(edge)
-            
+
         for u, v in change.edges_to_remove:
             self._adj_list[u].remove(v)
             self._adj_list[v].remove(u)
