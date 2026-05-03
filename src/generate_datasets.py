@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 KNOWN_METHODS: frozenset[str] = frozenset({"padma", "pdd", "ergm", "dummyEdges", "dummyNodes", "anndg", "anndgD", "anndgE", "anndgED", "nextGen"})
 
 
-def generate_graph(target_stats: dict[str, Any], method: str, rng: np.random.Generator = None) -> nx.Graph:
+def generate_graph(target_stats: dict[str, Any], method: str, rng: np.random.Generator = None) -> tuple[nx.Graph, dict]:
     """Generates a graph using method.
 
     Args:
@@ -39,7 +39,7 @@ def generate_graph(target_stats: dict[str, Any], method: str, rng: np.random.Gen
         method: The generating method.
         rng: Random number generator.
     Returns:
-        A synthetic NetworkX graph.
+        A tuple (G_nx, info) where G_nx is the NetworkX graph and info is a dict.
     Raises:
         ValueError: If the method is not supported or required data is missing.
     """
@@ -47,23 +47,17 @@ def generate_graph(target_stats: dict[str, Any], method: str, rng: np.random.Gen
         rng = np.random.default_rng()
 
     if method == "nextGen":
-        G_nx, _ = anndg_generate_graph(target_stats, rng)
-        return G_nx
+        return anndg_generate_graph(target_stats, rng)
     elif method == "padma":
-        G_nx, _ = padma_generate_graph(target_stats, rng)
-        return G_nx
+        return padma_generate_graph(target_stats, rng)
     elif method == "anndg":
-        G_nx, _ = anndg_generate_graph(target_stats, rng=rng)
-        return G_nx
+        return anndg_generate_graph(target_stats, rng=rng)
     elif method == "anndgD":
-        G_nx, _ = anndg_generate_graph(target_stats, replicate_diameter=True, rng=rng)
-        return G_nx
+        return anndg_generate_graph(target_stats, replicate_diameter=True, rng=rng)
     elif method == "anndgE":
-        G_nx, _ = anndg_generate_graph(target_stats, replicate_ecc_moments=True, rng=rng)
-        return G_nx
+        return anndg_generate_graph(target_stats, replicate_ecc_moments=True, rng=rng)
     elif method == "anndgED":
-        G_nx, _ = anndg_generate_graph(target_stats, replicate_ecc_moments=True, replicate_diameter=True, rng=rng)
-        return G_nx
+        return anndg_generate_graph(target_stats, replicate_ecc_moments=True, replicate_diameter=True, rng=rng)
     elif method == "pdd":
         if "observed_nx" not in target_stats: raise ValueError("Method 'pdd' requires 'observed_nx' in target_stats.")
         
@@ -71,7 +65,7 @@ def generate_graph(target_stats: dict[str, Any], method: str, rng: np.random.Gen
         n_edges = G_nx.number_of_edges()
 
         # Edge swaps require at least 2 edges
-        if n_edges < 2: return G_nx
+        if n_edges < 2: return G_nx, {}
 
         num_target_swaps = n_edges * 10
         try:
@@ -87,7 +81,7 @@ def generate_graph(target_stats: dict[str, Any], method: str, rng: np.random.Gen
                 "Swaps requested: %d, Error: %s", num_target_swaps, e
             )
 
-        return G_nx
+        return G_nx, {}
     elif method == "ergm":
         # Exponential Random Graph Model estimation and sampling.
         if "observed_nx" not in target_stats:
@@ -147,7 +141,7 @@ def generate_graph(target_stats: dict[str, Any], method: str, rng: np.random.Gen
         if not synth_igraphs:
             raise RuntimeError("ERGM failed to generate any synthetic samples.")
             
-        return igraph_to_networkx(synth_igraphs[0])
+        return igraph_to_networkx(synth_igraphs[0]), {}
     elif method == "dummyNodes":
         # A graph with the same number of nodes as the observed graph, with random number of edges.
         n_nodes = target_stats["n_nodes"]
@@ -155,13 +149,13 @@ def generate_graph(target_stats: dict[str, Any], method: str, rng: np.random.Gen
         p = n_edges / (n_nodes * (n_nodes - 1) / 2) + rng.uniform(-0.05, 0.05)
         p = max(0, min(1, p))
         G_nx = nx.erdos_renyi_graph(n=n_nodes, p=p, seed=int(rng.integers(0, 2**31)))
-        return G_nx
+        return G_nx, {}
     elif method == "dummyEdges":
         # A graph with the same number of nodes and edges as the observed graph.
         n_nodes = target_stats["n_nodes"]
         n_edges = target_stats["n_edges"]
         G_nx = nx.gnm_random_graph(n=n_nodes, m=n_edges, seed=int(rng.integers(0, 2**31)))
-        return G_nx
+        return G_nx, {}
     else:
         raise ValueError(f"Unknown method: {method}. Choose from {', '.join(KNOWN_METHODS)}.")
 
@@ -214,6 +208,7 @@ def generate_synthetic_variants(
     # variant_datasets[v] will hold one PyG Data object per original graph
     variant_datasets: list[list[Data]] = [[] for _ in range(num_variants)]
     variant_seeds:    list[list[int]]  = [[] for _ in range(num_variants)]
+    variant_infos:    list[list[dict]] = [[] for _ in range(num_variants)]
 
     # Pre-generate all seeds to ensure reproducibility and pass them to workers
     # We need a seed for each (graph, variant) pair
@@ -261,17 +256,18 @@ def generate_synthetic_variants(
         # Reconstruct variant_datasets from results
         # results is a list of (graph_idx, list_of_graphs, list_of_seeds)
         results.sort(key=lambda x: x[0])
-        for i, graphs, seeds, worker_errors in results:
+        for i, graphs, seeds, worker_errors, infos in results:
             for variant_idx, exc_msg in worker_errors:
                 logger.error(f"Generation failed for graph {i} variant {variant_idx} (method={method}): {exc_msg}")
             for v in range(num_variants):
                 variant_datasets[v].append(graphs[v])
                 variant_seeds[v].append(seeds[v])
+                variant_infos[v].append(infos[v])
     else:
         with logging_redirect_tqdm():
             pbar = tqdm(tasks, desc=f"Phase A [{dataset_name}/{method}]")
             for task in pbar:
-                i, graphs, seeds, worker_errors = _worker_generate_variants(
+                i, graphs, seeds, worker_errors, infos = _worker_generate_variants(
                     task, method, num_variants
                 )
                 for variant_idx, exc_msg in worker_errors:
@@ -279,12 +275,22 @@ def generate_synthetic_variants(
                 for v in range(num_variants):
                     variant_datasets[v].append(graphs[v])
                     variant_seeds[v].append(seeds[v])
+                    variant_infos[v].append(infos[v])
 
     # Persist each variant to disk
-    for v, (graphs, seeds) in enumerate(zip(variant_datasets, variant_seeds)):
+    for v, (graphs, seeds, infos) in enumerate(zip(variant_datasets, variant_seeds, variant_infos)):
         filename = f"{dataset_name}_synth_v{v}.pt"
         
-        synth_stats = per_graph_statistics(graphs, show_progress=False)
+        # Map generator-specific info keys to standardized topology metric keys
+        precomputed_stats = []
+        for info in infos:
+            mapped = {}
+            if "best_annd" in info: mapped["annd"] = info["best_annd"]
+            if "best_ecc_moments" in info: mapped["ecc_moments"] = info["best_ecc_moments"]
+            if "best_diameter" in info: mapped["diameter"] = info["best_diameter"]
+            precomputed_stats.append(mapped)
+
+        synth_stats = per_graph_statistics(graphs, precomputed_stats=precomputed_stats, show_progress=False)
         synth_agg = aggregate_statistics(synth_stats)
         
         metadata = {
@@ -317,20 +323,23 @@ def _worker_generate_variants(task, method, num_variants):
         
     graphs = []
     seeds = []
+    infos = []
     errors = []
     for v in range(num_variants):
         current_seed = seeds_list[v]
         try:
-            synth_nx = generate_graph(target_stats, method, np.random.default_rng(current_seed))
+            synth_nx, info = generate_graph(target_stats, method, np.random.default_rng(current_seed))
             synth_ig = networkx_to_igraph(synth_nx)
             synth_pyg = igraph_to_pytorch(synth_ig, y)
             graphs.append(synth_pyg)
             seeds.append(current_seed)
+            infos.append(info)
         except Exception as exc:
             errors.append((v, str(exc)))
             # Let's create a minimal graph with 1 node.
             dummy_pyg = Data(x=torch.ones((1, 1)), edge_index=torch.empty((2, 0), dtype=torch.long), y=y, num_nodes=1)
             graphs.append(dummy_pyg)
             seeds.append(-1)
+            infos.append({})
             
-    return i, graphs, seeds, errors
+    return i, graphs, seeds, errors, infos

@@ -3,10 +3,12 @@ from pathlib import Path
 
 import igraph as ig
 import numpy as np
+import networkx as nx
 import matplotlib.pyplot as plt
 
 from src.anndg.graph_state import GraphState, GraphChange
 from src.graph_analysis import calculate_degree_assortativity
+from src.data_utils import igraph_to_networkx
 
 
 def _compute_annd_objective(actual_annd: np.ndarray, target_annd: np.ndarray, weights: np.ndarray) -> float:
@@ -178,7 +180,7 @@ def optimizer(
     target_ecc_moments: np.ndarray | None = None,
     rng: np.random.Generator | None = None, 
     debug: bool = False
-) -> tuple[GraphState, float]:
+) -> tuple[nx.Graph, dict]:
     """
     Optimizes a graph's ANND (Average Nearest Neighbor Degree) to match a target vector.
 
@@ -188,12 +190,13 @@ def optimizer(
         rng: The random number generator instance.
         debug: Whether to print optimization progress and plot errors.
     Returns:
-        The optimized `GraphState` exhibiting the best discovered ANND configuration and the final error.
+        A tuple (graph, info) where graph is the optimized `nx.Graph` and info 
+        is a dictionary containing 'best_error', 'best_annd', and 'best_ecc_moments'.
     """
     rng = rng or np.random.default_rng()
     target_annd = np.asarray(target_annd, dtype=float)
     if debug:
-        target_assortativity = -0.6963
+        target_assortativity = -0.2179
     bins = len(target_annd)
     weights = np.ones(bins)/bins
 
@@ -241,11 +244,22 @@ def optimizer(
 
     if best_state['error'] < good_enough_threshold:
         if debug: print(f"Early stopping at step 0 - Best error: {best_state['error']:.6f} at step 0")
-        return best_state['graph_state'], best_state['error']
+        best_gs = best_state['graph_state']
+        info = {
+            "best_error": best_state['error'],
+            "best_annd": best_gs.get_annd(),
+        }
+        if target_diameter is not None:
+            info["best_diameter"] = best_gs.exact_diameter
+            
+        if target_ecc_moments is not None:
+            info["best_ecc_moments"] = best_gs.ecc_moments
+        
+        return igraph_to_networkx(best_gs.get_graph()), info
 
+    current_annd = initial_annd
     # Main loop
     for step in range(1, max_steps):
-        current_annd = graph_state.get_annd()
 
         # Local loop to find a valid proposal
         change = None
@@ -262,9 +276,10 @@ def optimizer(
         if change is None:
             break
 
-        # Propose state change
+        # Calculate proposal error
         graph_state.apply_change(change)
-        proposed_error = _compute_annd_objective(current_annd, target_annd, weights=weights)
+        proposed_annd = graph_state.get_annd()
+        proposed_error = _compute_annd_objective(proposed_annd, target_annd, weights=weights)
         if target_diameter is not None:
             proposed_error = 0.9 * proposed_error + 0.1 * _compute_diameter_objective(graph_state.exact_diameter, target_diameter)
         if target_ecc_moments is not None:
@@ -277,10 +292,14 @@ def optimizer(
             best_state['graph_state'] = graph_state.copy()
             best_state['step'] = step
             steps_without_improvement = 0
+            current_annd = proposed_annd
+            if debug:
+                print(f"Accepted improvement at step {step}: error = {current_error:.4f}, annd_vector = {current_annd}")
         elif rng.random() < np.exp((best_state['error'] - proposed_error) / temperature):
             # accept non improving steps with probability exp(-delta/T)
             current_error = proposed_error
             steps_without_improvement += 1
+            current_annd = proposed_annd
         else:
             # reject
             graph_state.revert_change(change)
@@ -331,4 +350,15 @@ def optimizer(
         plt.tight_layout()
         plt.show()
 
-    return best_state['graph_state'], best_state['error']
+    best_gs = best_state['graph_state']
+    info = {
+        "best_error": best_state['error'],
+        "best_annd": best_gs.get_annd(),
+    }
+    if target_diameter is not None:
+        info["best_diameter"] = best_gs.exact_diameter
+    
+    if target_ecc_moments is not None:
+        info["best_ecc_moments"] = best_gs.ecc_moments
+
+    return igraph_to_networkx(best_gs.get_graph()), info

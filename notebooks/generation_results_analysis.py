@@ -72,6 +72,7 @@ def load_generation_data() -> pd.DataFrame:
                     "method": "original",
                     "graph_idx": i,
                     "variant_idx": -1,
+                    "seed": pd.NA,
                     "deg_moments_error": 0.0,
                     "annd_error": 0.0,
                     "ecc_moments_error": 0.0,
@@ -97,6 +98,7 @@ def load_generation_data() -> pd.DataFrame:
             for v_idx, v_path in enumerate(variant_paths):
                 dataset_obj = DatasetPT(v_path)
                 per_graph_stats = dataset_obj.metadata.get("per_graph_statistics", [])
+                seeds = dataset_obj.metadata.get("seeds", [])
                 for i, stats in enumerate(per_graph_stats):
                     # Get target stats
                     orig = original_stats_map.get((dataset_name, i))
@@ -117,6 +119,7 @@ def load_generation_data() -> pd.DataFrame:
                         "deg_moments_error": dm_err,
                         "annd_error": annd_err,
                         "ecc_moments_error": ecc_err,
+                        "seed": seeds[i] if i < len(seeds) else pd.NA,
                     }
                     # Flatten the stats dictionary
                     for key, value in stats.items():
@@ -128,6 +131,8 @@ def load_generation_data() -> pd.DataFrame:
                     rows.append(row)
             
     df = pd.DataFrame(rows)
+    if "seed" in df.columns:
+        df["seed"] = df["seed"].astype("Int64")
     return df
 
 def compute_generation_errors(df: pd.DataFrame) -> pd.DataFrame:
@@ -141,7 +146,7 @@ def compute_generation_errors(df: pd.DataFrame) -> pd.DataFrame:
     df_synth = df[df["method"] != "original"].copy()
     
     # 2. Identify columns to compute deltas for (all stats columns)
-    metadata_cols = ["dataset", "method", "graph_idx", "variant_idx", 
+    metadata_cols = ["dataset", "method", "graph_idx", "variant_idx", "seed",
                      "deg_moments_error", "annd_error", "ecc_moments_error"]
     stat_cols = [c for c in df.columns if c not in metadata_cols and c not in IGNORED_METRICS]
     
@@ -159,6 +164,7 @@ def compute_generation_errors(df: pd.DataFrame) -> pd.DataFrame:
                 "method": synth_row["method"],
                 "graph_idx": g_idx,
                 "variant_idx": synth_row["variant_idx"],
+                "seed": synth_row.get("seed", np.nan),
                 "deg_moments_error": synth_row["deg_moments_error"],
                 "annd_error": synth_row["annd_error"],
                 "ecc_moments_error": synth_row["ecc_moments_error"]
@@ -169,7 +175,10 @@ def compute_generation_errors(df: pd.DataFrame) -> pd.DataFrame:
                     err_row[col] = abs(synth_row[col] - orig_row[col])
             error_rows.append(err_row)
             
-    return pd.DataFrame(error_rows)
+    df_errs = pd.DataFrame(error_rows)
+    if "seed" in df_errs.columns:
+        df_errs["seed"] = df_errs["seed"].astype("Int64")
+    return df_errs
 
 # Load data and compute errors
 df = load_generation_data()
@@ -298,7 +307,7 @@ def get_top_errors(metric: str, dataset_name: str, method_name: str, n: int = 5)
     print(f"\n--- Top {n} errors for metric '{metric}' (Dataset: {dataset_name}, Method: {method_name}) ---")
     
     # 3. Display results
-    display_cols = ["dataset", "method", "graph_idx", "variant_idx", metric]
+    display_cols = ["dataset", "method", "graph_idx", "variant_idx", "seed", metric, "annd_0", "annd_1", "annd_2", "annd_3", "annd_error"]
     with pd.option_context('display.expand_frame_repr', False, 'display.width', 1000, 'display.max_columns', None):
         display(top_n[display_cols])
         

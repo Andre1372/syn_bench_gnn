@@ -1,13 +1,12 @@
 """ Graph Generator for ANNDG (Average Nearest Neighbor Degree Generator) """
 
 import numpy as np
-import igraph as ig
 import networkx as nx
 from typing import Any
 
 from src.padma.graph_generator import generate_graph as padma_generate_graph
 
-from src.data_utils import networkx_to_igraph, igraph_to_networkx
+from src.data_utils import networkx_to_igraph
 
 from src.anndg.optimizer import optimizer
 # ---------------------------------------------------------------------------
@@ -42,7 +41,7 @@ def generate_graph(
 
     target_diameter = target_stats["diameter"] if replicate_diameter else None
     target_ecc_moments = target_stats["ecc_moments"] if replicate_ecc_moments else None    
-    best_state, best_error = optimizer(
+    best_graph, opt_info = optimizer(
         networkx_to_igraph(nx_graph), 
         target_stats["annd"], 
         target_diameter=target_diameter, 
@@ -50,9 +49,6 @@ def generate_graph(
         rng=rng,
         debug=debug
     )
-    info["best_objective"] = best_error
-
-    best_graph = best_state.get_graph()
-    best_graph = igraph_to_networkx(best_graph)
+    info.update(opt_info)
     
     return best_graph, info

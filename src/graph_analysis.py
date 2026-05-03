@@ -60,20 +60,27 @@ def aggregate_statistics(per_graph_stats: list[dict[str, Any]]) -> dict[str, Any
     return mean_stats
 
 
-def per_graph_statistics(data_list: list[Data], show_progress: bool = False) -> list[dict[str, Any]]:
+def per_graph_statistics(data_list: list[Data], precomputed_stats: list[dict[str, Any]] | None = None, show_progress: bool = False) -> list[dict[str, Any]]:
     """Calculates absolute topological and motif statistics for each graph in a list.
 
     Args:
         data_list: List of PyG Data graphs to analyze.
+        precomputed_stats: Optional list of dictionaries containing precomputed statistics
+            to be merged (and potentially override) the analyzed values.
         show_progress: Whether to show a progress bar.
     Returns:
         A list of dictionaries containing absolute statistics for each graph.
     """
-    all_stats: list[dict[str, float]] = []
+    all_stats: list[dict[str, Any]] = []
 
-    for data in tqdm(data_list, desc="Analyzing graph statistics", disable=not show_progress):
+    for i, data in enumerate(tqdm(data_list, desc="Analyzing graph statistics", disable=not show_progress)):
         ig_graph = pytorch_to_igraph(data)
         stats_vals = analyze_single_graph(ig_graph)
+        
+        # Merge precomputed stats if available for this specific graph
+        if precomputed_stats is not None:
+            stats_vals.update(precomputed_stats[i])
+            
         all_stats.append(stats_vals)
 
     return all_stats

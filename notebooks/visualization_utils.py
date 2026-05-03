@@ -47,27 +47,32 @@ def plot_graph(
 
 
 def plot_annd(
-    graph: nx.Graph, 
-    ax: plt.Axes, 
+    graph: nx.Graph | None = None, 
+    ax: plt.Axes = None, 
     title: str = "Average Nearest Neighbor Degree", 
     label: str = 'Synthetic $k_{nn}(k)$',
     target_graph: nx.Graph | None = None,
-    bins: int = 4
+    bins: int = 4,
+    annd_values: np.ndarray | None = None
 ) -> None:
     """Visualizes the average nearest neighbor degree for a given graph, 
     optionally overlaying a target graph for comparison.
 
     Args:
-        graph: The networkx graph to analyze (synthetic/primary).
+        graph: The networkx graph to analyze (synthetic/primary). Optional if annd_values is provided.
         ax: The matplotlib Axes to draw onto.
         title: Title for the plot.
         label: Label for the primary graph.
         target_graph: Optional networkx graph to overlay (original/target).
         bins: Number of percentile bins for aggregation.
+        annd_values: Optional precomputed ANND values to plot.
     """
-    # Convert to igraph to use the shared analysis logic
-    ig_graph = networkx_to_igraph(graph)
-    annd_values = calculate_annd(ig_graph, bins=bins)
+    if annd_values is None:
+        if graph is None:
+            return
+        # Convert to igraph to use the shared analysis logic
+        ig_graph = networkx_to_igraph(graph)
+        annd_values = calculate_annd(ig_graph, bins=bins)
     
     if len(annd_values) == 0:
         return

@@ -63,7 +63,7 @@ GRAPH_SYNTH_IG = networkx_to_igraph(GRAPH_SYNTH_NX)
 fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
 
 plot_graph(graph=GRAPH_SYNTH_NX, ax=ax1, dataset_name=f"{DATASET} (Synthetic)", graph_index=IDX)
-plot_annd(graph=GRAPH_SYNTH_NX, ax=ax2, title=f"ANND - Synthetic", label='Synthetic $k_{nn}(k)$', target_graph=GRAPH_NX)
+plot_annd(annd_values=info['best_annd'], ax=ax2, title=f"ANND - Synthetic", label='Synthetic $k_{nn}(k)$', target_graph=GRAPH_NX)
 
 # Calculate and print assortativity
 obtained_stats = analyze_single_graph(GRAPH_SYNTH_IG)
@@ -83,12 +83,18 @@ for m in scalar_metrics:
     delta = abs(orig - synth)
     print(f"{m.capitalize():<25} | {orig:>12.4f} | {synth:>12.4f} | {delta:>10.4f}")
 
+# ANND comparison
+print("-" * 70)
+print(f"{'ANND Bin 0':<25} | {target_stats['annd'][0]:>12.4f} | {info['best_annd'][0]:>12.4f} | {abs(target_stats['annd'][0] - info['best_annd'][0]):>10.4f}")
+print(f"{'ANND Bin 1':<25} | {target_stats['annd'][1]:>12.4f} | {info['best_annd'][1]:>12.4f} | {abs(target_stats['annd'][1] - info['best_annd'][1]):>10.4f}")
+print(f"{'ANND Bin 2':<25} | {target_stats['annd'][2]:>12.4f} | {info['best_annd'][2]:>12.4f} | {abs(target_stats['annd'][2] - info['best_annd'][2]):>10.4f}")
+print(f"{'ANND Bin 3':<25} | {target_stats['annd'][3]:>12.4f} | {info['best_annd'][3]:>12.4f} | {abs(target_stats['annd'][3] - info['best_annd'][3]):>10.4f}")
 print("-" * 70)
 
 # Structural error computation
 from src.graph_analysis import calculate_moments_error
 
-annd_error = calculate_annd_error(obtained_stats['annd'], target_stats['annd'])
+annd_error = calculate_annd_error(info['best_annd'], target_stats['annd'])
 moments_error = calculate_moments_error(target_stats['normalized_degree_moments'], obtained_stats['normalized_degree_moments'])
 diameter_error = abs(obtained_stats['diameter'] - target_stats['diameter']) / target_stats['diameter'] if target_stats['diameter'] > 0 else 0.0
 
