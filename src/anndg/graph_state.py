@@ -176,7 +176,7 @@ class GraphState:
         if current_value is not None and target_value is not None:
             knn_nodes, _ = self.get_graph().knn()
             knn_raw = np.array(knn_nodes, dtype=float)
-            norm_factor = (self._num_active_nodes - 1)
+            norm_factor = (self._num_nodes - 1)
             if norm_factor > 0:
                 # Calculate normalized KNN for nodes in this bin
                 bin_knn = knn_raw[bin_nodes] / norm_factor
@@ -204,7 +204,7 @@ class GraphState:
         
         knn_nodes, _ = self.get_graph().knn()
         annd_raw = np.array(knn_nodes, dtype=float)
-        norm_factor = (self._num_active_nodes - 1)
+        norm_factor = (self._num_nodes - 1)
 
         # Calculate mean for each fixed group of nodes using pre-calculated indices
         return np.array([
@@ -221,7 +221,7 @@ class GraphState:
         
         eccentricities = self.get_graph().eccentricity()
         ecc_raw = np.array(eccentricities, dtype=float)
-        norm_factor = (self._num_active_nodes - 1)
+        norm_factor = (self._num_nodes - 1)
 
         # Calculate mean for each fixed group of nodes using pre-calculated indices
         return np.array([

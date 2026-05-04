@@ -208,7 +208,7 @@ def calculate_annd(graph: ig.Graph, bins: int = 4, bin_indices: list[np.ndarray]
             return np.zeros(bins, dtype=float), bin_indices
 
     annd_raw = np.array(knn_nodes, dtype=float)
-    norm_factor = (n_active - 1)
+    norm_factor = (n_nodes - 1)
 
     # Calculate mean for each group of nodes using indices
     annd_bins = np.array([
@@ -267,7 +267,7 @@ def calculate_eccentricity(graph: ig.Graph, bins: int = 4, bin_indices: list[np.
             return np.zeros(bins, dtype=float), bin_indices
 
     ecc_raw = np.array(eccentricities, dtype=float)
-    norm_factor = (n_active - 1)
+    norm_factor = (n_nodes - 1)
 
     # Calculate mean for each group of nodes using indices
     ecc_bins = np.array([

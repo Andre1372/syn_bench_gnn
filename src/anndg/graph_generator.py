@@ -19,7 +19,6 @@ from src.anndg.optimizer import optimizer
 
 def generate_graph(
     target_stats: dict[str, Any], 
-    replicate_diameter: bool = False, 
     replicate_eccentricity: bool = False,
     rng: np.random.Generator = None,
     debug: bool = False
@@ -29,7 +28,7 @@ def generate_graph(
 
     Args:
         target_stats: Dictionary containing the target statistics.
-        replicate_diameter: Whether to include diameter in the objective function.
+        replicate_eccentricity: Whether to include eccentricity in the objective function.
         rng: Random number generator.
         debug: Whether to show optimization progress and plots.
     Returns:
@@ -39,12 +38,10 @@ def generate_graph(
 
     nx_graph, info = padma_generate_graph(target_stats, rng)
 
-    target_diameter = target_stats["diameter"] if replicate_diameter else None
     target_eccentricity = target_stats["eccentricity"] if replicate_eccentricity else None    
     best_graph, opt_info = optimizer(
         networkx_to_igraph(nx_graph), 
         target_stats["annd"], 
-        target_diameter=target_diameter, 
         target_eccentricity=target_eccentricity,
         rng=rng,
         debug=debug

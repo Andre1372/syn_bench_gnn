@@ -24,7 +24,7 @@ from src.anndg.graph_generator import generate_graph as anndg_generate_graph
 logger = logging.getLogger(__name__)
 
 
-KNOWN_METHODS: frozenset[str] = frozenset({"padma", "pdd", "ergm", "dummyEdges", "dummyNodes", "anndg", "anndgD", "anndgE", "anndgED", "nextGen"})
+KNOWN_METHODS: frozenset[str] = frozenset({"padma", "pdd", "ergm", "dummyEdges", "dummyNodes", "anndg", "anndgE", "nextGen"})
 
 
 def generate_graph(target_stats: dict[str, Any], method: str, rng: np.random.Generator = None) -> tuple[nx.Graph, dict]:
@@ -47,17 +47,13 @@ def generate_graph(target_stats: dict[str, Any], method: str, rng: np.random.Gen
         rng = np.random.default_rng()
 
     if method == "nextGen":
-        return anndg_generate_graph(target_stats, rng)
+        return anndg_generate_graph(target_stats, rng, replicate_eccentricity=False)
     elif method == "padma":
         return padma_generate_graph(target_stats, rng)
     elif method == "anndg":
         return anndg_generate_graph(target_stats, rng=rng)
-    elif method == "anndgD":
-        return anndg_generate_graph(target_stats, replicate_diameter=True, rng=rng)
     elif method == "anndgE":
         return anndg_generate_graph(target_stats, replicate_eccentricity=True, rng=rng)
-    elif method == "anndgED":
-        return anndg_generate_graph(target_stats, replicate_eccentricity=True, replicate_diameter=True, rng=rng)
     elif method == "pdd":
         if "observed_nx" not in target_stats: raise ValueError("Method 'pdd' requires 'observed_nx' in target_stats.")
         
@@ -287,7 +283,6 @@ def generate_synthetic_variants(
             mapped = {}
             if "best_annd" in info: mapped["annd"] = info["best_annd"]
             if "best_eccentricity" in info: mapped["eccentricity"] = info["best_eccentricity"]
-            if "best_diameter" in info: mapped["diameter"] = info["best_diameter"]
             precomputed_stats.append(mapped)
 
         synth_stats = per_graph_statistics(graphs, precomputed_stats=precomputed_stats, show_progress=False)
