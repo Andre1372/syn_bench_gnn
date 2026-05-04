@@ -220,7 +220,7 @@ def optimizer(
             info["best_diameter"] = best_gs.exact_diameter
             
         if target_eccentricity is not None:
-            info["best_eccentricity"] = best_gs.eccentricity
+            info["best_eccentricity"] = best_gs.get_eccentricity()
         
         return igraph_to_networkx(best_gs.get_graph()), info
 
@@ -326,6 +326,6 @@ def optimizer(
         info["best_diameter"] = best_gs.exact_diameter
     
     if target_eccentricity is not None:
-        info["best_eccentricity"] = best_gs.eccentricity
+        info["best_eccentricity"] = best_gs.get_eccentricity()
 
     return igraph_to_networkx(best_gs.get_graph()), info

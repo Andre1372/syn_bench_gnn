@@ -11,7 +11,7 @@ import seaborn as sns
 import networkx as nx
 
 from src.data_utils import networkx_to_igraph
-from src.graph_analysis import calculate_annd
+from src.graph_analysis import calculate_annd, calculate_eccentricity
 
 
 def plot_graph(
@@ -46,6 +46,45 @@ def plot_graph(
     ax.axis("off")
 
 
+def _plot_binned_metric(
+    ax: plt.Axes,
+    values: np.ndarray,
+    target_values: np.ndarray | None = None,
+    title: str = "Metric Plot",
+    ylabel: str = "Metric Value",
+    label: str = "Synthetic",
+    target_label: str = "Original",
+    primary_color: str = "#3498db",
+    secondary_color: str = "#2c3e50",
+    target_color: str = "#dc2626"
+) -> None:
+    """Internal helper to plot binned graph metrics (ANND, Eccentricity, etc.)
+    consistently across different visualizations.
+    """
+    if len(values) == 0:
+        return
+
+    x_axis = np.arange(1, len(values) + 1)
+
+    # Plot target graph first if provided (in background)
+    if target_values is not None:
+        ax.plot(x_axis, target_values, color=target_color, linestyle='--', linewidth=2, alpha=0.8, 
+                marker='o', markersize=8, markerfacecolor='white', markeredgewidth=1.5, label=target_label)
+
+    # Plot primary graph
+    ax.scatter(x_axis, values, color=secondary_color, s=100, alpha=0.8, edgecolors='white', linewidth=1.5, label=label)
+    ax.plot(x_axis, values, color=primary_color, linestyle='-', linewidth=2, alpha=0.5)
+
+    ax.set_xlabel("Percentile Bin Index", fontsize=12, fontweight='bold')
+    ax.set_ylabel(ylabel, fontsize=12, fontweight='bold')
+    ax.set_title(title, fontsize=14, pad=15)
+    ax.grid(True, linestyle="--", alpha=0.3)
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    
+    ax.legend(frameon=True, facecolor='white', framealpha=0.9)
+
+
 def plot_annd(
     graph: nx.Graph | None = None, 
     ax: plt.Axes = None, 
@@ -70,37 +109,68 @@ def plot_annd(
     if annd_values is None:
         if graph is None:
             return
-        # Convert to igraph to use the shared analysis logic
         ig_graph = networkx_to_igraph(graph)
         annd_values, _ = calculate_annd(ig_graph, bins=bins)
     
-    if len(annd_values) == 0:
-        return
-    
-    # calculate_annd returns binned values
-    x_axis = np.arange(1, len(annd_values) + 1)
-    
-    # Plot target graph first if provided (in background)
+    target_values = None
     if target_graph is not None:
         ig_target = networkx_to_igraph(target_graph)
         target_values, _ = calculate_annd(ig_target, bins=bins)
-        
-        # Plot target in red
-        ax.plot(x_axis, target_values, color='#dc2626', linestyle='--', linewidth=2, alpha=0.8, 
-                marker='o', markersize=8, markerfacecolor='white', markeredgewidth=1.5, label='Original $k_{nn}(k)$')
 
-    # Plot primary graph
-    ax.scatter(x_axis, annd_values, color='#2c3e50', s=100, alpha=0.8, edgecolors='white', linewidth=1.5, label=label)
-    ax.plot(x_axis, annd_values, color='#3498db', linestyle='-', linewidth=2, alpha=0.5)
+    _plot_binned_metric(
+        ax=ax,
+        values=annd_values,
+        target_values=target_values,
+        title=title,
+        ylabel="Avg. Neighbor Degree $k_{nn}(k)$",
+        label=label,
+        target_label='Original $k_{nn}(k)$'
+    )
 
-    ax.set_xlabel("Percentile Bin Index", fontsize=12, fontweight='bold')
-    ax.set_ylabel("Avg. Neighbor Degree $k_{nn}(k)$", fontsize=12, fontweight='bold')
-    ax.set_title(title, fontsize=14, pad=15)
-    ax.grid(True, linestyle="--", alpha=0.3)
-    ax.spines['top'].set_visible(False)
-    ax.spines['right'].set_visible(False)
+
+def plot_eccentricity(
+    graph: nx.Graph | None = None,
+    ax: plt.Axes = None,
+    title: str = "Node Eccentricity",
+    label: str = 'Synthetic $e(u)$',
+    target_graph: nx.Graph | None = None,
+    bins: int = 4,
+    ecc_values: np.ndarray | None = None
+) -> None:
+    """Visualizes the node eccentricity for a given graph, 
+    optionally overlaying a target graph for comparison.
+
+    Args:
+        graph: The networkx graph to analyze (synthetic/primary). Optional if ecc_values is provided.
+        ax: The matplotlib Axes to draw onto.
+        title: Title for the plot.
+        label: Label for the primary graph.
+        target_graph: Optional networkx graph to overlay (original/target).
+        bins: Number of percentile bins for aggregation.
+        ecc_values: Optional precomputed eccentricity values to plot.
+    """
+    if ecc_values is None:
+        if graph is None:
+            return
+        ig_graph = networkx_to_igraph(graph)
+        ecc_values, _ = calculate_eccentricity(ig_graph, bins=bins)
     
-    ax.legend(frameon=True, facecolor='white', framealpha=0.9)
+    target_values = None
+    if target_graph is not None:
+        ig_target = networkx_to_igraph(target_graph)
+        target_values, _ = calculate_eccentricity(ig_target, bins=bins)
+
+    _plot_binned_metric(
+        ax=ax,
+        values=ecc_values,
+        target_values=target_values,
+        title=title,
+        ylabel="Avg. Node Eccentricity $e(u)$",
+        label=label,
+        target_label='Original $e(u)$',
+        primary_color="#9b59b6",  # Purple for eccentricity
+        secondary_color="#4b0082" # Indigo
+    )
 
 
 def add_baseline_guide(

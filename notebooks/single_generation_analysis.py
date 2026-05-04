@@ -20,8 +20,8 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.data_utils import pytorch_to_networkx, networkx_to_igraph, DatasetPT
-from src.graph_analysis import analyze_single_graph, calculate_annd_error, calculate_moments_error
-from notebooks.visualization_utils import plot_graph, plot_annd
+from src.graph_analysis import analyze_single_graph, calculate_annd_error, calculate_moments_error, calculate_eccentricity_error
+from notebooks.visualization_utils import plot_graph, plot_annd, plot_eccentricity
 from src.anndg.graph_generator import generate_graph
 
 
@@ -40,33 +40,26 @@ GRAPH_IG = networkx_to_igraph(GRAPH_NX)
 
 
 
-# Cell 2 - Original Graph Analysis
-fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
-
-plot_graph(graph=GRAPH_NX, ax=ax1, dataset_name=f"{DATASET}", graph_index=IDX)
-plot_annd(graph=GRAPH_NX, ax=ax2, title=f"ANND - {DATASET}")
-
-# Calculate and print assortativity
+# Cell 2 - Comparative Analysis
+# Analyze Original Graph
 target_stats = analyze_single_graph(GRAPH_IG)
 
-plt.tight_layout()
-plt.show()
-
-
-# Cell 3 - Synthetic Graph Generation (PADMA)
-# Generate synthetic graph
+# Generate and Analyze Synthetic Graph
 rng = np.random.default_rng(seed=5)
-GRAPH_SYNTH_NX, info = generate_graph(target_stats, rng=rng, debug=True)
+GRAPH_SYNTH_NX, info = generate_graph(target_stats, rng=rng, debug=True, replicate_eccentricity=True)
 GRAPH_SYNTH_IG = networkx_to_igraph(GRAPH_SYNTH_NX)
-
-# Plot synthetic results
-fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
-
-plot_graph(graph=GRAPH_SYNTH_NX, ax=ax1, dataset_name=f"{DATASET} (Synthetic)", graph_index=IDX)
-plot_annd(annd_values=info['best_annd'], ax=ax2, title=f"ANND - Synthetic", label='Synthetic $k_{nn}(k)$', target_graph=GRAPH_NX)
-
-# Calculate and print assortativity
 obtained_stats = analyze_single_graph(GRAPH_SYNTH_IG)
+
+# Combined Visualization
+fig, axes = plt.subplots(2, 2, figsize=(16, 12))
+
+# Row 1: Graph Structures
+plot_graph(graph=GRAPH_NX, ax=axes[0, 0], dataset_name=f"{DATASET} (Original)", graph_index=IDX)
+plot_graph(graph=GRAPH_SYNTH_NX, ax=axes[0, 1], dataset_name=f"{DATASET} (Synthetic)", graph_index=IDX)
+
+# Row 2: Topological Metrics
+plot_annd(annd_values=info['best_annd'], ax=axes[1, 0], title="ANND Profile", target_graph=GRAPH_NX)
+plot_eccentricity(ecc_values=info['best_eccentricity'], ax=axes[1, 1], title="Eccentricity Profile", target_graph=GRAPH_NX)
 
 plt.tight_layout()
 plt.show()
@@ -92,6 +85,7 @@ print(f"{'ANND Bin 3':<25} | {target_stats['annd'][3]:>12.4f} | {info['best_annd
 print("-" * 70)
 
 annd_error = calculate_annd_error(info['best_annd'], target_stats['annd'])
+ecc_error = calculate_eccentricity_error(info['best_eccentricity'], target_stats['eccentricity'])
 moments_error = calculate_moments_error(target_stats['normalized_degree_moments'], obtained_stats['normalized_degree_moments'])
 diameter_error = abs(obtained_stats['diameter'] - target_stats['diameter']) / target_stats['diameter'] if target_stats['diameter'] > 0 else 0.0
 
@@ -99,5 +93,6 @@ print(f"\n{'STRUCTURAL ERROR SUMMARY':<25} | {'VALUE':<12}")
 print("-" * 40)
 print(f"{'Moments Error':<25} | {moments_error:>12.4f}")
 print(f"{'ANND Error':<25} | {annd_error:>12.4f}")
+print(f"{'Eccentricity Error':<25} | {ecc_error:>12.4f}")
 print(f"{'Diameter Error':<25} | {diameter_error:>12.4f}")
 print("="*70 + "\n")

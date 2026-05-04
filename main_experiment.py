@@ -55,7 +55,7 @@ def parse_arguments() -> argparse.Namespace:
         "--methods",
         type=str,
         nargs="+",
-        default=["padma"],
+        default=["dummyNodes", "dummyEdges", "padma", "anndg", "anndgE"],
         metavar="METHOD",
         help=f"Generation methods to run.  Supported: {', '.join(KNOWN_METHODS)}.",
     )

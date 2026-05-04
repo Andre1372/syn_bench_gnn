@@ -4,7 +4,7 @@ from dataclasses import dataclass
 import numpy as np
 import igraph as ig
 from collections import deque
-from src.graph_analysis import calculate_diameter, calculate_eccentricity_moments
+from src.graph_analysis import calculate_diameter
 
 
 @dataclass(frozen=True)

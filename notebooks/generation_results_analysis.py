@@ -404,6 +404,6 @@ def generate_global_summary(df_errs: pd.DataFrame, metrics: list[str]) -> Tuple[
     print("\n=== Global Replication Score (Lower is better) ===")
     display(global_scores.to_frame())
     
-    return summary_df, global_scores
+    return global_scores
 
-summary_df, global_scores = generate_global_summary(df_errors, plot_stats)
+global_scores = generate_global_summary(df_errors, plot_stats)
