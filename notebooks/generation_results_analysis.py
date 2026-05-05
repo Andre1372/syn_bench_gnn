@@ -48,7 +48,7 @@ def load_generation_data() -> pd.DataFrame:
 
     def extract_errors(stats):
         """Extracts stats as numpy arrays for error calculation."""
-        deg_moments = np.array(stats.get("normalized_degree_moments", [0]*4))
+        deg_moments = np.array(stats.get("degree_moments", [0]*4))
         annd = np.array(stats.get("annd", [0]*4))
         eccentricity = np.array(stats.get("eccentricity", [0]*4))
         return deg_moments, annd, eccentricity
@@ -316,7 +316,7 @@ def get_top_errors(metric: str, dataset_name: str, method_name: str, n: int = 5)
 
 # Example Analysis
 plot_stats = ["modularity", "clustering", "assortativity", "efficiency", "diameter",  
- "normalized_degree_moments_0", "normalized_degree_moments_1", "normalized_degree_moments_2", "normalized_degree_moments_3", "deg_moments_error", 
+ "degree_moments_0", "degree_moments_1", "degree_moments_2", "degree_moments_3", "deg_moments_error", 
  "annd_0", "annd_1", "annd_2", "annd_3", "annd_error", 
  "eccentricity_0", "eccentricity_1", "eccentricity_2", "eccentricity_3", "eccentricity_error"]
 

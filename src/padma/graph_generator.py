@@ -220,7 +220,7 @@ def generate_graph(target_stats: dict[str, Any], rng: np.random.Generator = None
         6. Randomize via double edge swaps.
 
     Args:
-        target_stats: Dictionary containing 'n_nodes' and 'normalized_degree_moments'.
+        target_stats: Dictionary containing 'n_nodes' and 'degree_moments'.
         rng: NumPy random generator.
         normalize_by_size: If True, assumes moments were normalized on [0, 1] scale.
         debug: If True, logs detailed diagnostics.
@@ -234,7 +234,7 @@ def generate_graph(target_stats: dict[str, Any], rng: np.random.Generator = None
     n = target_stats["n_nodes"]
     if n < 2: raise ValueError(f"Graph must have at least 2 nodes, got {n}.")
 
-    moments = target_stats["normalized_degree_moments"]
+    moments = target_stats["degree_moments"]
     n_moments = len(moments)
 
     # ── Step 1: extract moments ──────────────────────────────────────────────

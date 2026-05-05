@@ -92,7 +92,7 @@ if 'best_eccentricity' in info:
     ecc_error = calculate_eccentricity_error(info['best_eccentricity'], target_stats['eccentricity'])
 else:
     ecc_error = np.nan
-moments_error = calculate_moments_error(target_stats['normalized_degree_moments'], obtained_stats['normalized_degree_moments'])
+moments_error = calculate_moments_error(target_stats['degree_moments'], obtained_stats['degree_moments'])
 diameter_error = abs(obtained_stats['diameter'] - target_stats['diameter']) / target_stats['diameter'] if target_stats['diameter'] > 0 else 0.0
 
 print(f"\n{'STRUCTURAL ERROR SUMMARY':<25} | {'VALUE':<12}")

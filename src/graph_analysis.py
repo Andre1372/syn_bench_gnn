@@ -113,7 +113,7 @@ def analyze_single_graph(graph: ig.Graph) -> dict[str, float]:
         "assortativity": assortativity,
         "efficiency": efficiency,
         "diameter": diameter,
-        "normalized_degree_moments": deg_moments,
+        "degree_moments": deg_moments,
         "annd": annd,
         "eccentricity": eccentricity,
     }

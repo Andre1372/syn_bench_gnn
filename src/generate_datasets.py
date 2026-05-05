@@ -46,7 +46,7 @@ def generate_graph(target_stats: dict[str, Any], method: str, rng: np.random.Gen
         target_stats: Dictionary containing graph statistics:
             - 'n_nodes': Number of nodes.
             - 'n_edges': Number of edges.
-            - 'normalized_degree_moments': List of moments for PADMA.
+            - 'degree_moments': List of moments for PADMA.
             - 'observed_nx': (Optional) The original graph for 'pdd'.
         method: The generating method.
         rng: Random number generator.

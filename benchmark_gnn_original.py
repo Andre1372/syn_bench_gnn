@@ -39,7 +39,7 @@ from src.train_gnn import evaluate_dataset
 # Defaults
 # ---------------------------------------------------------------------------
 
-ALL_DATASETS = ["MUTAG", "BZR", "DHFR", "Mutagenicity", "AIDS", "COX2", "DD", "IMDB-BINARY", "PROTEINS", "PTC_FM", "PTC_FR", "PTC_MM", "PTC_MR", "REDDIT-BINARY"]
+ALL_DATASETS = ["MUTAG", "BZR", "DHFR", "Mutagenicity", "AIDS", "COX2", "DD", "IMDB-BINARY", "PROTEINS", "PTC_FM", "PTC_FR", "PTC_MM", "PTC_MR"]
 
 FEATURE_STRATEGIES: dict[str, bool] = {
     "dummy":      False,

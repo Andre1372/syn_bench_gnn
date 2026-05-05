@@ -87,7 +87,7 @@ def verify_original_consistency(df: pd.DataFrame):
     Raises:
         ValueError: If a discrepancy is found for any metric in any original graph.
     """
-    metrics = ["modularity", "clustering", "assortativity", "efficiency", "diameter", "normalized_degree_moments", "annd"]
+    metrics = ["modularity", "clustering", "assortativity", "efficiency", "diameter", "degree_moments", "annd"]
     metrics = [m for m in metrics if m in df.columns]
     
     for (ds, g_idx), grp in df.groupby(["dataset", "graph_idx"]):
@@ -152,7 +152,7 @@ def load_experiment_data() -> Tuple[pd.DataFrame, pd.DataFrame]:
         df_pg_raw = pd.concat(dfs_pg, ignore_index=True)
         df_pg_raw["source_base"] = df_pg_raw["source"].apply(lambda s: s.rsplit("_", 1)[0] if s != "original" else s)
         df_pg_raw["source_base"] = pd.Categorical(df_pg_raw["source_base"], categories=categories, ordered=True)
-        # Parse 'normalized_degree_moments' into numpy arrays
+        # Parse 'degree_moments' into numpy arrays
         def parse_array(s):
             if isinstance(s, np.ndarray): return s
             if pd.isna(s): return np.zeros(4)
@@ -160,13 +160,13 @@ def load_experiment_data() -> Tuple[pd.DataFrame, pd.DataFrame]:
             return np.fromstring(s_clean, sep=' ')
 
         for df_target in [df_raw, df_pg_raw]:
-            if "normalized_degree_moments" in df_target.columns:
-                df_target["normalized_degree_moments"] = df_target["normalized_degree_moments"].apply(parse_array)
+            if "degree_moments" in df_target.columns:
+                df_target["degree_moments"] = df_target["degree_moments"].apply(parse_array)
             if "annd" in df_target.columns:
                 df_target["annd"] = df_target["annd"].apply(parse_array)
                 # Unpack into individual deg_moment_X columns
                 for i in range(4):
-                    df_target[f"deg_moment_{i+1}"] = df_target["normalized_degree_moments"].apply(lambda x: x[i] if len(x)>i else 0.0)
+                    df_target[f"deg_moment_{i+1}"] = df_target["degree_moments"].apply(lambda x: x[i] if len(x)>i else 0.0)
             if "eccentricity" in df_target.columns:
                 df_target["eccentricity"] = df_target["eccentricity"].apply(parse_array)
 
@@ -185,7 +185,7 @@ def load_experiment_data() -> Tuple[pd.DataFrame, pd.DataFrame]:
             target_eccentricity_dict = {}
             for (d_name, g_idx), grp in original_df.groupby(["dataset", "graph_idx"]):
                 
-                valid_moments_arrays = [x for x in grp["normalized_degree_moments"].values if len(x) == 4]
+                valid_moments_arrays = [x for x in grp["degree_moments"].values if len(x) == 4]
                 if valid_moments_arrays:
                     target_moments_dict[(d_name, g_idx)] = np.mean(valid_moments_arrays, axis=0)
                 
@@ -207,7 +207,7 @@ def load_experiment_data() -> Tuple[pd.DataFrame, pd.DataFrame]:
                 target = target_moments_dict.get((ds, g_idx))
                 if target is None: return np.nan
                 
-                actual = row["normalized_degree_moments"]
+                actual = row["degree_moments"]
 
                 return calculate_moments_error(actual, target)
 

@@ -292,7 +292,7 @@ def get_target_stats(dataset_obj: DatasetPT, idx: int) -> dict[str, Any]:
             "n_nodes": int(pgs.get("n_nodes")),
             "n_edges": int(pgs.get("n_edges")),
             "diameter": pgs.get("diameter"),
-            "normalized_degree_moments": pgs.get("normalized_degree_moments"),
+            "degree_moments": pgs.get("degree_moments"),
             "annd": pgs.get("annd"),
             "eccentricity": pgs.get("eccentricity"),
         }
