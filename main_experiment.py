@@ -314,9 +314,12 @@ def main() -> None:
                 with logging_redirect_tqdm():
                     for pt_path in eval_tasks:
                         logger.debug(f"Evaluating path: {pt_path}.")
+                        variant_meta = DatasetPT(pt_path).metadata
+                        variant_in_dim = variant_meta.get("in_dim", gnn_config["in_dim"])
+                        variant_gnn_config = {**gnn_config, "in_dim": variant_in_dim}
                         glob_res, pg_res = evaluate_dataset(
                             pt_path=pt_path,
-                            gnn_config=gnn_config,
+                            gnn_config=variant_gnn_config,
                             device=device,
                             split_indices=split_indices,
                             dataset_name=dataset_name,
