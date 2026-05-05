@@ -45,13 +45,13 @@ GRAPH_IG = networkx_to_igraph(GRAPH_NX)
 target_stats = analyze_single_graph(GRAPH_IG)
 
 # Generate and Analyze Synthetic Graph
-rng = np.random.default_rng(seed=5)
-GRAPH_SYNTH_NX, info = generate_graph(target_stats, rng=rng, debug=True, replicate_eccentricity=True)
+rng = np.random.default_rng(seed=40689061)
+GRAPH_SYNTH_NX, info = generate_graph(target_stats, rng=rng, debug=True, replicate_eccentricity=False)
 GRAPH_SYNTH_IG = networkx_to_igraph(GRAPH_SYNTH_NX)
 obtained_stats = analyze_single_graph(GRAPH_SYNTH_IG)
 
 # Combined Visualization
-fig, axes = plt.subplots(2, 2, figsize=(16, 12))
+fig, axes = plt.subplots(2, 2, figsize=(10, 6))
 
 # Row 1: Graph Structures
 plot_graph(graph=GRAPH_NX, ax=axes[0, 0], dataset_name=f"{DATASET} (Original)", graph_index=IDX)
@@ -59,7 +59,10 @@ plot_graph(graph=GRAPH_SYNTH_NX, ax=axes[0, 1], dataset_name=f"{DATASET} (Synthe
 
 # Row 2: Topological Metrics
 plot_annd(annd_values=info['best_annd'], ax=axes[1, 0], title="ANND Profile", target_graph=GRAPH_NX)
-plot_eccentricity(ecc_values=info['best_eccentricity'], ax=axes[1, 1], title="Eccentricity Profile", target_graph=GRAPH_NX)
+if 'best_eccentricity' in info:
+    plot_eccentricity(ecc_values=info['best_eccentricity'], ax=axes[1, 1], title="Eccentricity Profile", target_graph=GRAPH_NX)
+else:
+    axes[1, 1].axis('off')
 
 plt.tight_layout()
 plt.show()
@@ -85,7 +88,10 @@ print(f"{'ANND Bin 3':<25} | {target_stats['annd'][3]:>12.4f} | {info['best_annd
 print("-" * 70)
 
 annd_error = calculate_annd_error(info['best_annd'], target_stats['annd'])
-ecc_error = calculate_eccentricity_error(info['best_eccentricity'], target_stats['eccentricity'])
+if 'best_eccentricity' in info:
+    ecc_error = calculate_eccentricity_error(info['best_eccentricity'], target_stats['eccentricity'])
+else:
+    ecc_error = np.nan
 moments_error = calculate_moments_error(target_stats['normalized_degree_moments'], obtained_stats['normalized_degree_moments'])
 diameter_error = abs(obtained_stats['diameter'] - target_stats['diameter']) / target_stats['diameter'] if target_stats['diameter'] > 0 else 0.0
 

@@ -14,7 +14,19 @@ from torch_geometric.datasets import TUDataset
 from tqdm import tqdm
 from tqdm.contrib.logging import logging_redirect_tqdm
 
-from src.data_utils import DatasetPT, preprocess_and_save_original_dataset, get_target_stats, igraph_to_pytorch, networkx_to_igraph, igraph_to_networkx, pytorch_to_igraph, save_synthetic_dataset, remove_features
+from src.data_utils import (
+    DatasetPT,
+    preprocess_and_save_original_dataset,
+    get_target_stats,
+    igraph_to_pytorch,
+    networkx_to_igraph,
+    igraph_to_networkx,
+    pytorch_to_igraph,
+    save_synthetic_dataset,
+    remove_features,
+    compute_log_bin_edges,
+    apply_log_bin_features,
+)
 from src.graph_analysis import per_graph_statistics, aggregate_statistics
 
 from src.padma.graph_generator import generate_graph as padma_generate_graph
@@ -47,13 +59,13 @@ def generate_graph(target_stats: dict[str, Any], method: str, rng: np.random.Gen
         rng = np.random.default_rng()
 
     if method == "nextGen":
-        return anndg_generate_graph(target_stats, rng, replicate_eccentricity=False)
+        return anndg_generate_graph(target_stats, rng=rng, replicate_eccentricity=True)
     elif method == "padma":
         return padma_generate_graph(target_stats, rng)
     elif method == "anndg":
-        return anndg_generate_graph(target_stats, rng=rng)
+        return anndg_generate_graph(target_stats, rng=rng, replicate_eccentricity=False)
     elif method == "anndgE":
-        return anndg_generate_graph(target_stats, replicate_eccentricity=True, rng=rng)
+        return anndg_generate_graph(target_stats, rng=rng, replicate_eccentricity=True)
     elif method == "pdd":
         if "observed_nx" not in target_stats: raise ValueError("Method 'pdd' requires 'observed_nx' in target_stats.")
         
@@ -200,6 +212,11 @@ def generate_synthetic_variants(
     
     # original statistics are already saved inside the metadata
     orig_per_graph_stats = metadata.get("per_graph_statistics", [])
+    # Whether to apply log-binned degree features (read from the original dataset metadata).
+    # If True, each variant will compute its own bin edges after all graphs are generated.
+    use_log_bin_deg: bool = metadata.get("use_log_bin_deg", False)
+    if use_log_bin_deg:
+        logger.info(f"Log-binned degree features enabled for {dataset_name}: bin edges will be computed per-variant after generation.")
 
     # variant_datasets[v] will hold one PyG Data object per original graph
     variant_datasets: list[list[Data]] = [[] for _ in range(num_variants)]
@@ -228,7 +245,7 @@ def generate_synthetic_variants(
             'target_stats': target_stats,
             'y': data.y,
             'obs_nx': obs_nx,
-            'seeds': all_seeds[i]
+            'seeds': all_seeds[i],
         })
 
     if num_workers > 1:
@@ -276,7 +293,23 @@ def generate_synthetic_variants(
     # Persist each variant to disk
     for v, (graphs, seeds, infos) in enumerate(zip(variant_datasets, variant_seeds, variant_infos)):
         filename = f"{dataset_name}_synth_v{v}.pt"
-        
+
+        # Compute per-variant bin edges and re-encode features if requested.
+        # Bin edges are computed from THIS variant's degree distribution, not the original dataset's.
+        if use_log_bin_deg:
+            variant_bin_edges = compute_log_bin_edges(graphs)
+            variant_in_dim = len(variant_bin_edges) - 1
+            logger.info(f"Variant {v}: recomputed {variant_in_dim} bins from {len(graphs)} synthetic graphs.")
+            re_encoded: list[Data] = []
+            for data in graphs:
+                g = pytorch_to_igraph(data)
+                x = apply_log_bin_features(g, variant_bin_edges)
+                re_encoded.append(Data(x=x, edge_index=data.edge_index, y=data.y, num_nodes=data.num_nodes))
+            graphs = re_encoded
+        else:
+            variant_bin_edges = []
+            variant_in_dim = 1
+
         # Map generator-specific info keys to standardized topology metric keys
         precomputed_stats = []
         for info in infos:
@@ -294,6 +327,9 @@ def generate_synthetic_variants(
             "variant_idx": v,
             "num_variants": num_variants,
             "seeds": seeds,
+            "use_log_bin_deg": use_log_bin_deg,
+            "bin_edges": variant_bin_edges,
+            "in_dim": variant_in_dim,
             "per_graph_statistics": synth_stats,
             "aggregate_statistics": synth_agg,
         }
@@ -331,7 +367,7 @@ def _worker_generate_variants(task, method, num_variants):
             infos.append(info)
         except Exception as exc:
             errors.append((v, str(exc)))
-            # Let's create a minimal graph with 1 node.
+            # Fallback: minimal 1-node graph with dummy features.
             dummy_pyg = Data(x=torch.ones((1, 1)), edge_index=torch.empty((2, 0), dtype=torch.long), y=y, num_nodes=1)
             graphs.append(dummy_pyg)
             seeds.append(-1)

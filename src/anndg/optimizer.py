@@ -44,7 +44,7 @@ _DEBUG_TARGET_ASSORTATIVITY: float = -0.2179
 # Objective functions
 # ---------------------------------------------------------------------------
 
-def _compute_annd_objective(actual_annd: np.ndarray, target_annd: np.ndarray) -> np.ndarray:
+def _compute_annd_errors(actual_annd: np.ndarray, target_annd: np.ndarray) -> np.ndarray:
     """Per-bin loss between the actual and target ANND profiles.
 
     Args:
@@ -56,7 +56,7 @@ def _compute_annd_objective(actual_annd: np.ndarray, target_annd: np.ndarray) ->
     return np.log1p(_ANND_LOSS_SCALE * np.abs(actual_annd - target_annd) ** _ANND_LOSS_EXPONENT)
 
 
-def _compute_eccentricity_objective(actual_ecc: np.ndarray, target_ecc: np.ndarray) -> np.ndarray:
+def _compute_eccentricity_errors(actual_ecc: np.ndarray, target_ecc: np.ndarray) -> np.ndarray:
     """Per-bin loss between the actual and target eccentricity profiles.
 
     Args:
@@ -130,9 +130,9 @@ def _propose_intelligent_double_edge_swap(
         return None
 
     # --- PART 1: Sample the first edge (u, v) ---
-    annd_bin_errors = _compute_annd_objective(current_annd, target_annd)
+    annd_bin_errors = _compute_annd_errors(current_annd, target_annd)
     if current_ecc is not None and target_ecc is not None:
-        ecc_bin_errors = _compute_eccentricity_objective(current_ecc, target_ecc)
+        ecc_bin_errors = _compute_eccentricity_errors(current_ecc, target_ecc)
         bin_errors = _ANND_WEIGHT * annd_bin_errors + _ECC_WEIGHT * ecc_bin_errors
     else:
         bin_errors = annd_bin_errors
@@ -224,8 +224,8 @@ def optimizer(
     cooling = 2 ** (-_COOLING_BITS / max_steps)
 
     # ---- Initial error ------------------------------------------------------
-    annd_errors = _compute_annd_objective(current_annd, target_annd)
-    ecc_errors = _compute_eccentricity_objective(current_ecc, target_eccentricity) if current_ecc is not None else None
+    annd_errors = _compute_annd_errors(current_annd, target_annd)
+    ecc_errors = _compute_eccentricity_errors(current_ecc, target_eccentricity) if current_ecc is not None else None
     current_error = _combined_error(annd_errors, ecc_errors)
 
     if debug:
@@ -277,8 +277,8 @@ def optimizer(
         proposed_annd = graph_state.get_annd()
         proposed_ecc = graph_state.get_eccentricity() if target_eccentricity is not None else None
         
-        proposed_annd_errors = _compute_annd_objective(proposed_annd, target_annd)
-        proposed_ecc_errors = _compute_eccentricity_objective(proposed_ecc, target_eccentricity) if proposed_ecc is not None else None
+        proposed_annd_errors = _compute_annd_errors(proposed_annd, target_annd)
+        proposed_ecc_errors = _compute_eccentricity_errors(proposed_ecc, target_eccentricity) if proposed_ecc is not None else None
         proposed_error = _combined_error(proposed_annd_errors, proposed_ecc_errors)
 
         # Acceptance

@@ -125,6 +125,14 @@ def parse_arguments() -> argparse.Namespace:
         action="store_true",
         help="Run a fast functional test (1 epoch, 1 run, small models).",
     )
+    parser.add_argument(
+        "--features_BinLogDeg",
+        action="store_true",
+        help=(
+            "Use log-binned degree one-hot vectors as node features instead of the "
+            "default all-ones dummy vector."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -186,7 +194,13 @@ def main() -> None:
                 args.process_original = True
                 logger.info(f"Dataset {dataset_name} not found, enabling --process_original.")
             if args.process_original:
-                preprocess_and_save_original_dataset(dataset_name, project_root / "data", max_size=args.cut_datasets, rng=rng)
+                preprocess_and_save_original_dataset(
+                    dataset_name,
+                    project_root / "data",
+                    max_size=args.cut_datasets,
+                    rng=rng,
+                    use_log_bin_deg=args.features_BinLogDeg,
+                )
             else:
                 logger.info(f"Using existing original dataset for {dataset_name} (skip re-processing).")
 
@@ -225,7 +239,6 @@ def main() -> None:
     gnn_config_base = {
         "num_runs"  : 1 if args.quick_test else args.gnn_runs,
         "lr"        : 5e-4,
-        "in_dim"    : 1,
         "hidden_dim": 16 if args.quick_test else 256,
         "num_layers": 1 if args.quick_test else 3,
         "dropout"   : 0.1,
@@ -238,7 +251,13 @@ def main() -> None:
 
         orig_pt_path = project_root / "data" / dataset_name / f"{dataset_name}_original.pt"
         if not orig_pt_path.exists():
-            preprocess_and_save_original_dataset(dataset_name, project_root / "data", max_size=args.cut_datasets, rng=rng)
+            preprocess_and_save_original_dataset(
+                dataset_name,
+                project_root / "data",
+                max_size=args.cut_datasets,
+                rng=rng,
+                use_log_bin_deg=args.features_BinLogDeg,
+            )
 
         orig_dataset_obj = DatasetPT(orig_pt_path)
         # The .pt already contains the (possibly cut) dataset — no extra sampling needed.
@@ -247,6 +266,7 @@ def main() -> None:
 
         gnn_config = {
             **gnn_config_base,
+            "in_dim"     : orig_dataset_obj.metadata.get("in_dim", 1),
             "num_classes": orig_dataset_obj.metadata.get("num_classes"),
         }
 
