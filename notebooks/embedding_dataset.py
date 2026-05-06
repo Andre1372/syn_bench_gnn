@@ -13,8 +13,10 @@ import pandas as pd
 import torch
 from IPython.display import display
 import seaborn as sns
-from scipy.stats import skew, kurtosis
-from tqdm.auto import tqdm
+from scipy.stats import skew, kurtosis, wasserstein_distance
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import roc_auc_score, accuracy_score
 
 # Ensure project root is in path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent if "__file__" in globals() else Path(".").resolve().parent
@@ -22,6 +24,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.data_utils import DatasetPT
+from src.enc_dec_dataset import MomentsEncoderDecoder, PercentileEncoderDecoder
 
 
 
@@ -33,6 +36,9 @@ CONTINUOUS_FEATURES = [
     "annd_0", "annd_1", "annd_2", "annd_3",
     "eccentricity_0", "eccentricity_1", "eccentricity_2", "eccentricity_3"
 ]
+FEATURES = DISCRETE_FEATURES + CONTINUOUS_FEATURES
+IS_DISCRETE = np.array([feat in DISCRETE_FEATURES for feat in FEATURES])
+RNG = np.random.default_rng(seed=42)
 
 def load_generation_data() -> pd.DataFrame:
     """Load and preprocess all original datasets and synthetic variants saving all per-graph statistics."""
@@ -72,202 +78,75 @@ def load_generation_data() -> pd.DataFrame:
 df = load_generation_data()
 display(df.head(10))
 
+# Initialize Encoder/Decoder with the correct number of classes and discrete info
+num_classes = int(df["class_id"].max() + 1)
+# ENC_DEC = MomentsEncoderDecoder(num_classes=num_classes, is_discrete=IS_DISCRETE, k=4, rng=RNG)
+ENC_DEC = PercentileEncoderDecoder(num_classes=num_classes, is_discrete=IS_DISCRETE, percentile_size=0.1, replicate_correlation=False, rng=RNG)
+
 DATASETS = [d for d in DATASET_NAMES if d in df["dataset"].unique()]
 
 
 
-# Cell 2 - Compute Dataset Embedding
-def _compute_stat_moments(stat_values: np.ndarray, k: int = 4) -> np.ndarray:
-    """Compute the k-th moments of the graph statistics.
+# Cell 2 - Encode and Sample dataset
+def encode_and_sample_dataset(df_dataset: pd.DataFrame, dataset_name: str) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """Encodes original statistics and samples synthetic ones for all classes in a dataset."""
+    embeddings_rows = []
+    samples_list = []
     
-    Args:
-        stat_values: Array of graph statistics
-        k: Number of moments to compute (mean, variance, skewness, kurtosis)
-    Returns:
-        Array with the k-th moments (mean, variance, skewness, kurtosis)
-    """
-    if not 1 <= k <= 4: 
-        raise ValueError("k must be between 1 and 4")
-
-    mom_funcs = [np.mean, np.var, skew, lambda x: kurtosis(x, fisher=False)][:k]
-
-    if stat_values.size == 0:
-        return np.zeros(k)
-
-    return np.array([mom_func(stat_values) for mom_func in mom_funcs])
-
-def compute_stat_embedding_per_class(df_dataset: pd.DataFrame, stat_encoding_func, k: int = 4) -> pd.DataFrame:
-    """Compute the k-th moments of the graph statistics for a single dataset and its classes.
-    
-    Args:
-        df_dataset: DataFrame containing graph statistics for one dataset
-        k: Number of moments to compute (mean, variance, skewness, kurtosis)
-    Returns:
-        DataFrame with the k-th moments for each class in the dataset
-    """
-    if k > 4 or k <= 0: raise ValueError("k must be between 1 and 4")
-    features = DISCRETE_FEATURES + CONTINUOUS_FEATURES
-    
-    dataset_name = df_dataset["dataset"].iloc[0]
-    results = []
     for class_id, group in df_dataset.groupby("class_id"):
-        row = {"class_id": class_id}
-        for feat in features:
-            row[feat] = stat_encoding_func(group[feat].values, k)
-        results.append(row)
-    
-    res = pd.DataFrame(results)
-    res.insert(0, "dataset", dataset_name)
-    return res
+        # --- Encode ---
+        stat_matrix = group[FEATURES].values
+        ENC_DEC.encode_features(stat_matrix, class_id)
 
-dataset_moments = []
+        # Save encodings for this class
+        emb_row = {"class_id": class_id}
+        encoding = ENC_DEC._encodings[class_id]
+        for i, feat in enumerate(FEATURES):
+            emb_row[feat] = encoding[:, i]
+        embeddings_rows.append(emb_row)
+
+        # --- Sample ---
+        n_samples = len(group)
+        samples_matrix = ENC_DEC.sample_features(n_samples, class_id)
+    
+        # Save samples for this class
+        class_samples_df = pd.DataFrame(samples_matrix, columns=FEATURES)
+        class_samples_df["class_id"] = class_id
+        class_samples_df[DISCRETE_FEATURES] = class_samples_df[DISCRETE_FEATURES].astype(int)
+        samples_list.append(class_samples_df)
+        
+    # Construct final DataFrames
+    df_emb = pd.DataFrame(embeddings_rows)
+    df_samples = pd.concat(samples_list, ignore_index=True)
+    
+    df_emb.insert(0, "dataset", dataset_name)
+    df_samples.insert(0, "dataset", dataset_name)
+    
+    return df_emb, df_samples
+
+dataset_embeddings = []
+dataset_samples = []
+
 for dataset_name in DATASETS:
     df_subset = df[df["dataset"] == dataset_name]
-    dataset_moments.append(compute_stat_embedding_per_class(df_subset, _compute_stat_moments, k=4))
-
-df_moments = pd.concat(dataset_moments, ignore_index=True)
-display(df_moments.head())
-
-
-
-# Cell 3 - Sampling
-def _sample_stat_moments(moments: np.ndarray, samples: int, rng: np.random.Generator) -> np.ndarray:
-    """
-    Generates a sample array of specified size that exactly matches the given statistical moments.
+    df_emb, df_s = encode_and_sample_dataset(df_subset, dataset_name)
     
-    Args:
-        moments: Array of target moments [mean, variance, skewness, kurtosis]. Length k (1 to 4).
-        samples: Number of samples to generate.
-        rng: NumPy random generator instance.
-    Returns:
-        Array of generated samples matching the target moments.
-    """
-    from scipy.optimize import minimize
-
-    k = len(moments)
-    if k == 0 or samples == 0:
-        return np.array([])
-        
-    # Sample from a standard normal distribution
-    z = rng.standard_normal(samples)
-    
-    # If k=1 (only mean), simply shift the sample
-    if k == 1:
-        return z - np.mean(z) + moments[0]
-        
-    # If k=2 (mean and variance), standardize and scale (Z-score re-scaling)
-    if k == 2:
-        z_std = (z - np.mean(z)) / np.std(z)
-        return z_std * np.sqrt(moments[1]) + moments[0]
-        
-    # Cost function for the optimizer (used for k=3 and k=4)
-    def loss_function(coeffs):
-        x_temp = np.zeros_like(z)
-        for i, c in enumerate(coeffs):
-            x_temp += c * (z ** i)
-            
-        current_moments = _compute_stat_moments(x_temp, k)
-        weights = 1.0 / (np.abs(moments) + 1e-5) 
-        return np.sum(((current_moments - moments) * weights) ** 2)
-
-    # If k=3 (mean, variance, skewness)
-    if k == 3:
-        # We use a 2nd degree polynomial: c0 + c1*Z + c2*Z^2
-        init_coeffs = np.zeros(3)
-        init_coeffs[0] = moments[0]
-        init_coeffs[1] = np.sqrt(max(moments[1], 1e-8))
-        # c2 starts at 0, the optimizer will find the value to generate the skewness
-        
-    # If k=4 (mean, variance, skewness, kurtosis)
-    elif k == 4:
-        target_skew, target_kurt = moments[2], moments[3]
-        if target_kurt < (target_skew**2 + 1):
-            print(f"The requested combination of Skewness ({target_skew:.2f}) "
-                          "and Kurtosis ({target_kurt:.2f}) violates the mathematical limits. "
-                          "The optimizer will do its best to approximate it.")
-        # We use a 3rd degree polynomial: c0 + c1*Z + c2*Z^2 + c3*Z^3
-        init_coeffs = np.zeros(4)
-        init_coeffs[0] = moments[0]
-        init_coeffs[1] = np.sqrt(max(moments[1], 1e-8))
-    
-    else:
-        raise ValueError("The moments array must have a length between 1 and 4.")
-
-    # Run the optimization
-    res = minimize(loss_function, init_coeffs, method='Nelder-Mead', options={'maxiter': 5000})
-    
-    if not res.success:
-        print("The optimizer failed to converge perfectly on the target moments.")
-
-    # Build final array with found coefficients
-    x_opt = np.zeros_like(z)
-    for i, c in enumerate(res.x):
-        x_opt += c * (z ** i)
-        
-    return x_opt
-
-def sample_dataset(df_dataset_moments: pd.DataFrame, samples_per_class: list[int], stat_decoding_func) -> pd.DataFrame:
-    """Given the moments per each statistic, sample a synthetic dataset.
-    
-    Args:
-        df_dataset_moments: DataFrame with the moments of the graph statistics for each class
-        samples_per_class: List of the number of samples to generate for each class
-    Returns:
-        DataFrame with the sampled statistics for each class
-    """
-    features = DISCRETE_FEATURES + CONTINUOUS_FEATURES
-    all_samples = []
-    
-    # Iterate over classes in the moments DataFrame
-    for i, (_, row) in enumerate(tqdm(df_dataset_moments.iterrows(), total=len(df_dataset_moments), desc="Sampling classes", leave=False)):
-        class_id = row["class_id"]
-        # Handle both list and Series/dict for samples_per_class
-        if isinstance(samples_per_class, (pd.Series, dict)):
-            n_samples = samples_per_class[class_id]
-        else:
-            n_samples = samples_per_class[i]
-        
-        # Prepare data for this class
-        class_data = {"class_id": np.full(n_samples, class_id)}
-        
-        for feat in features:
-            moms = row[feat]
-            samples = stat_decoding_func(moms, n_samples)
-            
-            # Post-process: DISCRETE_FEATURES must be non-negative integers
-            if feat in DISCRETE_FEATURES:
-                # n_nodes must be at least 1, n_edges at least 0
-                lower_bound = 1 if feat == "n_nodes" else 0
-                samples = np.round(np.maximum(lower_bound, samples)).astype(int)
-            
-            class_data[feat] = samples
-            
-        all_samples.append(pd.DataFrame(class_data))
-        
-    return pd.concat(all_samples, ignore_index=True)
-
-dataset_samples = []
-for dataset_name in DATASETS:
-    target_moments = df_moments[df_moments["dataset"] == dataset_name]
-    samples_per_class = df[df["dataset"] == dataset_name].groupby("class_id").size().to_dict()
-    rng = np.random.default_rng(seed=42)
-    
-    def decoding_func(moms, samples):
-        return _sample_stat_moments(moms, samples, rng)
-    
-    df_s = sample_dataset(target_moments, samples_per_class, decoding_func)
-    df_s.insert(0, "dataset", dataset_name)
+    dataset_embeddings.append(df_emb)
     dataset_samples.append(df_s)
+    
+    print(f"\n--- {dataset_name} ---")
+    display(df_emb.head())
+    display(df_s.head())
 
+df_embeddings = pd.concat(dataset_embeddings, ignore_index=True)
 df_synthetic = pd.concat(dataset_samples, ignore_index=True)
-display(df_synthetic.head())
 
 
 
-# Cell 4 - Verify sampling quality
+# Cell 3 - Verify sampling quality
 def plot_dataset_comparison(df_orig: pd.DataFrame, df_synth: pd.DataFrame, dataset_name: str) -> None:
     """Plots distributions of all metrics for original vs synthetic datasets."""
-    n_rows = 1 + (len(CONTINUOUS_FEATURES) + 3) // 4  # 1 row for discrete + rows for continuous
+    n_rows = 4  # 1 row for discrete + rows for continuous
     
     fig = plt.figure(figsize=(24, 5 * n_rows))
     fig.suptitle(f"Metric Comparison: {dataset_name} (Original vs Synthetic)", fontsize=22, fontweight="bold", y=0.92)
@@ -275,16 +154,13 @@ def plot_dataset_comparison(df_orig: pd.DataFrame, df_synth: pd.DataFrame, datas
     
     # Define mapping of feature to subplot
     metrics_map = []
-    
     # Row 0: Discrete features (spanning 2 columns each)
     metrics_map.append((DISCRETE_FEATURES[0], fig.add_subplot(gs[0, :2])))
-    metrics_map.append((DISCRETE_FEATURES[1], fig.add_subplot(gs[0, 2:])))
-    
+    metrics_map.append((DISCRETE_FEATURES[1], fig.add_subplot(gs[0, 2:])))    
     # Rows 1+: Continuous features (4 per row)
     for i, feat in enumerate(CONTINUOUS_FEATURES):
-        row = (i // 4) + 1
-        col = i % 4
-        metrics_map.append((feat, fig.add_subplot(gs[row, col])))
+        row, col = divmod(i, 4)
+        metrics_map.append((feat, fig.add_subplot(gs[row + 1, col])))
         
     for feat, ax in metrics_map:
         if feat not in df_orig.columns:
@@ -308,130 +184,230 @@ def plot_dataset_comparison(df_orig: pd.DataFrame, df_synth: pd.DataFrame, datas
         
     plt.show()
 
-DATASET_EMBEDDINGS = {}
+def compute_wassestrain_distance(df_orig: pd.DataFrame, df_synth: pd.DataFrame) -> dict:
+    """Computes the Wasserstein distance for each feature using anchored Min-Max scaling.
+    
+    Args:
+        df_orig: Original dataset DataFrame
+        df_synth: Synthetic dataset DataFrame
+    Returns:
+        Dictionary mapping feature names to their Wasserstein distance
+    """
+    results = {}
+    for feat in FEATURES:
+        if feat not in df_orig.columns or feat not in df_synth.columns:
+            raise ValueError(f"Feature {feat} not found in both datasets.")
+            
+        orig_values = df_orig[feat].values
+        synth_values = df_synth[feat].values
+        
+        # 1. Anchored Min-Max Scaling
+        min_val = np.min(orig_values)
+        max_val = np.max(orig_values)
+        range_val = max_val - min_val
+        
+        if range_val > 0:
+            orig_scaled = (orig_values - min_val) / range_val
+            synth_scaled = (synth_values - min_val) / range_val
+        else:
+            orig_scaled = orig_values - min_val
+            synth_scaled = synth_values - min_val
+            
+        # 2. Wasserstein Distance calculation
+        dist = wasserstein_distance(orig_scaled, synth_scaled)
+        results[feat] = dist
+        
+    return results
 
-def vectorize_embedding(df_m):
-    """Concatenate all moment arrays for all features and classes into a single vector."""
-    feats = DISCRETE_FEATURES + CONTINUOUS_FEATURES
-    return np.concatenate([np.concatenate(df_m[f].values) for f in feats])
 
-# Pre-compute synthetic embeddings for comparison
-print("Computing synthetic embeddings...")
-synth_moms_list = []
+all_distances_results = []
+
 for dataset_name in DATASETS:
-    df_s_sub = df_synthetic[df_synthetic["dataset"] == dataset_name]
-    if not df_s_sub.empty:
-        synth_moms_list.append(compute_stat_embedding_per_class(df_s_sub, _compute_stat_moments, k=4))
-df_synthetic_moments = pd.concat(synth_moms_list, ignore_index=True) if synth_moms_list else pd.DataFrame()
-
-for dataset_name in DATASETS:
-    print(f"\n{'-'*40}")
-    print(f"Dataset: {dataset_name}")
-    print(f"{'-'*40}")
+    df_orig = df[df["dataset"] == dataset_name]
+    df_synth = df_synthetic[df_synthetic["dataset"] == dataset_name]
     
-    # 1. Get subsets
-    df_orig_sub = df[df["dataset"] == dataset_name]
-    df_synth_sub = df_synthetic[df_synthetic["dataset"] == dataset_name]
+    # Visualization
+    plot_dataset_comparison(df_orig, df_synth, dataset_name)
     
-    # 2. Extract moments for comparison
-    orig_moments = df_moments[df_moments["dataset"] == dataset_name]
-    synth_moments = df_synthetic_moments[df_synthetic_moments["dataset"] == dataset_name]
-    
-    # 3. Fidelity Comparison (Vectorize embeddings)
-    v_orig = vectorize_embedding(orig_moments)
-    v_synth = vectorize_embedding(synth_moments)
-    
-    # Cosine Similarity
-    norm_orig = np.linalg.norm(v_orig)
-    norm_synth = np.linalg.norm(v_synth)
-    cos_sim = np.dot(v_orig, v_synth) / (norm_orig * norm_synth) if norm_orig > 0 and norm_synth > 0 else 0
-    
-    # 4. Visualization
-    plot_dataset_comparison(df_orig_sub, df_synth_sub, dataset_name)
+    # Statistical Evaluation
+    distances = compute_wassestrain_distance(df_orig, df_synth)
+    global_score = np.mean(list(distances.values()))
     
     # Store results
-    DATASET_EMBEDDINGS[dataset_name] = {
-        "v_orig": v_orig,
-        "v_synth": v_synth,
-        "cos_sim": cos_sim
-    }
+    res_row = {"Dataset": dataset_name}
+    res_row.update(distances)
+    res_row["GLOBAL_SCORE"] = global_score
+    all_distances_results.append(res_row)
 
-    print(f"  Results for {dataset_name}:")
-    print(f"    - Vector size:      {len(v_orig)}")
-    print(f"    - Cosine Similarity: {cos_sim:.4f}")
-    print(f"    - Classes:          {orig_moments['class_id'].tolist()}")
+# Final Summary Aggregation
+print("\n" + "="*100)
+print("FINAL CONSOLIDATED SUMMARY (Mean Wasserstein Distances across all datasets)")
+print("="*100)
+
+df_summary = pd.DataFrame(all_distances_results).set_index("Dataset")
+# Add a "MEAN" row to aggregate results across all datasets
+df_summary.loc["MEAN"] = df_summary.mean()
+
+display(df_summary)
+
+final_avg_global = df_summary.loc["MEAN", "GLOBAL_SCORE"]
+print(f"\n>>> FINAL PERFORMANCE (Average Global Score): {final_avg_global:.4f} <<<")
 
 
 
-# Cell 5 - Classifier
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.model_selection import train_test_split
-from sklearn.metrics import f1_score
-
-def evaluate_with_random_forest(
-    df_orig: pd.DataFrame, 
-    df_synth: pd.DataFrame,
-    discrete_features: list[str],
-    continuous_features: list[str]
-) -> None:
+# Cell 4 - Verify correlation between metrics
+def plot_correlation_matrix(df_orig: pd.DataFrame, df_synth: pd.DataFrame, dataset_name: str) -> list[np.ndarray]:
+    """Plots correlation heatmaps between original and synthetic metrics for each class.
+    
+    Args:
+        df_orig: Original dataset DataFrame
+        df_synth: Synthetic dataset DataFrame
+        dataset_name: Name of the dataset
+    Returns:
+        List of correlation difference matrices (one per class)
     """
-    Trains a Random Forest classifier to evaluate the datasets.
-    Evaluates:
-    1. Train on original, Test on original
-    2. Train on synthetic, Test on synthetic
-    3. Train on synthetic, Test on original
-    Returns and prints the F1 scores.
-    """
-    features = discrete_features + continuous_features
-    target = "class_id"
+    classes = sorted(df_orig["class_id"].unique())
+    n_classes = len(classes)
     
-    # 1. Split datasets
-    X_orig = df_orig[features]
-    y_orig = df_orig[target]
-    X_orig_train, X_orig_test, y_orig_train, y_orig_test = train_test_split(
-        X_orig, y_orig, test_size=0.2, random_state=42, stratify=y_orig
-    )
+    fig, axes = plt.subplots(n_classes, 3, figsize=(20, 6 * n_classes))
+    if n_classes == 1:
+        axes = axes.reshape(1, 3)
+        
+    fig.suptitle(f"Feature Correlations: {dataset_name} (Original vs Synthetic)", fontsize=22, fontweight="bold", y=0.99)
     
-    X_synth = df_synth[features]
-    y_synth = df_synth[target]
-    X_synth_train, X_synth_test, y_synth_train, y_synth_test = train_test_split(
-        X_synth, y_synth, test_size=0.2, random_state=42, stratify=y_synth
-    )
+    diff_matrices = []
     
-    # 2. Train and evaluate on original
-    rf_orig = RandomForestClassifier(random_state=42)
-    rf_orig.fit(X_orig_train, y_orig_train)
-    y_orig_pred = rf_orig.predict(X_orig_test)
-    f1_orig = f1_score(y_orig_test, y_orig_pred, average="weighted")
-    
-    # 3. Train and evaluate on synthetic
-    rf_synth = RandomForestClassifier(random_state=42)
-    rf_synth.fit(X_synth_train, y_synth_train)
-    y_synth_pred = rf_synth.predict(X_synth_test)
-    f1_synth = f1_score(y_synth_test, y_synth_pred, average="weighted")
-    
-    # 4. Train on synthetic, test on original
-    rf_cross = RandomForestClassifier(random_state=42)
-    rf_cross.fit(X_synth_train, y_synth_train)
-    y_cross_pred = rf_cross.predict(X_orig_test)
-    f1_cross = f1_score(y_orig_test, y_cross_pred, average="weighted")
-    
-    print("--- Classifier Evaluation (F1 Score) ---")
-    print(f"Train Orig  -> Test Orig:  {f1_orig:.4f}")
-    print(f"Train Synth -> Test Synth: {f1_synth:.4f}")
-    print(f"Train Synth -> Test Orig:  {f1_cross:.4f}")
-    print("-" * 40)
+    for i, class_id in enumerate(classes):
+        # Filter by class
+        orig_cls = df_orig[df_orig["class_id"] == class_id][FEATURES]
+        synth_cls = df_synth[df_synth["class_id"] == class_id][FEATURES]
+        
+        # Calculate Pearson correlations
+        corr_orig = orig_cls.corr().fillna(0)
+        corr_synth = synth_cls.corr().fillna(0)
+        corr_diff = corr_synth - corr_orig
+        
+        diff_matrices.append(corr_diff.values)
+        
+        # Heatmap styling
+        heatmap_kwargs = {
+            "center": 0,
+            "annot": False,
+            "square": True,
+            "cbar_kws": {"shrink": 0.8}
+        }
+        
+        # 1. Original Matrix
+        sns.heatmap(corr_orig, ax=axes[i, 0], cmap="coolwarm", vmin=-1, vmax=1, **heatmap_kwargs)
+        axes[i, 0].set_title(f"Class {class_id} - Original", fontsize=15, fontweight="bold")
+        
+        # 2. Synthetic Matrix
+        sns.heatmap(corr_synth, ax=axes[i, 1], cmap="coolwarm", vmin=-1, vmax=1, **heatmap_kwargs)
+        axes[i, 1].set_title(f"Class {class_id} - Synthetic", fontsize=15, fontweight="bold")
+        
+        # 3. Difference Matrix (Synthetic - Original)
+        # Use a different colormap to highlight discrepancies
+        sns.heatmap(corr_diff, ax=axes[i, 2], cmap="PiYG", vmin=-0.5, vmax=0.5, **heatmap_kwargs)
+        axes[i, 2].set_title(f"Class {class_id} - Difference (S - O)", fontsize=15, fontweight="bold")
 
-print(f"\n{'='*50}")
-print("SYSTEMATIC CLASSIFIER EVALUATION")
-print(f"{'='*50}")
+    plt.tight_layout(rect=[0, 0.03, 1, 0.96])
+    plt.show()
+    
+    return diff_matrices
+
+
+all_corr_errors = []
 
 for dataset_name in DATASETS:
-    print(f"\nProcessing {dataset_name}...")
+    df_orig = df[df["dataset"] == dataset_name]
+    df_synth = df_synthetic[df_synthetic["dataset"] == dataset_name]
     
-    # 1. Get pre-computed data subsets
-    df_orig_sub = df[df["dataset"] == dataset_name]
-    df_synth_sub = df_synthetic[df_synthetic["dataset"] == dataset_name]
+    # Correlation Analysis
+    diff_mats = plot_correlation_matrix(df_orig, df_synth, dataset_name)
     
-    # 2. Run Random Forest Evaluation
-    evaluate_with_random_forest(df_orig_sub, df_synth_sub, DISCRETE_FEATURES, CONTINUOUS_FEATURES)
+    # Compute global correlation error
+    avg_corr_err = np.mean([np.abs(m).mean() for m in diff_mats])
+    all_corr_errors.append({"Dataset": dataset_name, "Correlation_MAE": avg_corr_err})
+
+# Final Correlation Summary Table
+print("\n" + "="*100)
+print("FINAL CORRELATION FIDELITY SUMMARY (Mean Absolute Error)")
+print("="*100)
+df_corr_summary = pd.DataFrame(all_corr_errors).set_index("Dataset")
+df_corr_summary.loc["MEAN"] = df_corr_summary.mean()
+
+display(df_corr_summary)
+
+final_avg_corr = df_corr_summary.loc["MEAN", "Correlation_MAE"]
+print(f"\n>>> FINAL CORRELATION PERFORMANCE (Average MAE): {final_avg_corr:.4f} <<<")
+
+
+
+# Cell 5 - Adversarial Discriminator Check
+def run_adversarial_check(df_orig: pd.DataFrame, df_synth: pd.DataFrame, dataset_name: str, ax=None) -> dict:
+    """Trains a discriminator to distinguish between real and synthetic data."""
+    
+    # Assign label 0 to original, 1 to synthetic
+    df_orig_eval = df_orig[FEATURES].copy()
+    df_orig_eval["is_synthetic"] = 0
+    df_synth_eval = df_synth[FEATURES].copy()
+    df_synth_eval["is_synthetic"] = 1
+    
+    # Combine datasets
+    df_eval = pd.concat([df_orig_eval, df_synth_eval], ignore_index=True)
+    X = df_eval[FEATURES]
+    y = df_eval["is_synthetic"]
+    
+    # Train-Test Split
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.3, random_state=42, stratify=y)
+    
+    # Train Discriminator
+    classifier = RandomForestClassifier(n_estimators=100, max_depth=5, random_state=42, n_jobs=-1)
+    classifier.fit(X_train, y_train)
+    
+    # Predict and Evaluate
+    y_pred_proba = classifier.predict_proba(X_test)[:, 1]
+    y_pred = classifier.predict(X_test)
+    
+    auc_score = roc_auc_score(y_test, y_pred_proba)
+    acc_score = accuracy_score(y_test, y_pred)
+    
+    # Extract Feature Importance
+    importances = pd.Series(classifier.feature_importances_, index=FEATURES).sort_values(ascending=False)
+    
+    # Plotting Feature Importance if an axis is provided
+    if ax is not None:
+        sns.barplot(x=importances.values[:10], y=importances.index[:10], ax=ax, palette="viridis", hue=importances.index[:10])
+        ax.set_title(f"{dataset_name} Discriminator\nAUC: {auc_score:.3f} (Target: 0.5)", fontweight="bold")
+        ax.set_xlabel("Feature Importance")
+        sns.despine(ax=ax)
+        
+    return {
+        "Dataset": dataset_name,
+        "Discriminator_AUC": auc_score,
+        "Discriminator_Accuracy": acc_score,
+        "Top_Giveaway_Feature": importances.index[0]
+    }
+
+all_adversarial_results = []
+fig, axes = plt.subplots(1, len(DATASETS), figsize=(6 * len(DATASETS), 5))
+if len(DATASETS) == 1: axes = [axes]
+
+for i, dataset_name in enumerate(DATASETS):
+    df_o = df[df["dataset"] == dataset_name]
+    df_s = df_synthetic[df_synthetic["dataset"] == dataset_name]
+    
+    res = run_adversarial_check(df_o, df_s, dataset_name, ax=axes[i])
+    all_adversarial_results.append(res)
+
+plt.tight_layout()
+plt.show()
+
+# Final Summary Table
+df_adv_summary = pd.DataFrame(all_adversarial_results).set_index("Dataset")
+df_adv_summary.loc["MEAN"] = df_adv_summary[["Discriminator_AUC", "Discriminator_Accuracy"]].mean()
+
+display(df_adv_summary)
+
+final_avg_auc = df_adv_summary.loc["MEAN", "Discriminator_AUC"]
+print(f"\n>>> FINAL DISCRIMINATOR AUC: {final_avg_auc:.4f} (Closer to 0.5 is better) <<<")
