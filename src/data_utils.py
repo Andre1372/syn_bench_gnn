@@ -275,6 +275,68 @@ def apply_log_bin_features(g: ig.Graph, bin_edges: list[float]) -> torch.Tensor:
     return x
 
 
+def flatten_stats(per_graph_statistics: dict[str, Any]) -> tuple[np.ndarray, dict[str, int]]:
+    """Flattens a dictionary of graph statistics into a 1D NumPy array.
+
+    Args:
+        per_graph_statistics: Dictionary containing graph statistics (e.g., n_nodes, n_edges, annd).
+    Returns:
+        A tuple containing:
+            - A 1D float64 NumPy array of all concatenated statistics.
+            - A dictionary mapping each key to its size in the flat array.
+    """
+    parts: list[np.ndarray] = []
+    structure: dict[str, int] = {}
+
+    stat_keys: list[str] = ["n_nodes", "n_edges", "diameter", "degree_moments", "annd", "eccentricity"]
+
+    for key in stat_keys:
+        val = per_graph_statistics.get(key)
+        if val is None:
+            structure[key] = 0
+            continue
+
+        # Handle both scalars and sequences by converting to at least 1D array
+        arr = np.atleast_1d(val).astype(np.float64).flatten()
+        parts.append(arr)
+        structure[key] = arr.size
+
+    flat_array = np.concatenate(parts) if parts else np.array([], dtype=np.float64)
+    return flat_array, structure
+
+
+def unflatten_stats(flat_arr: np.ndarray, structure: dict[str, int]) -> dict[str, Any]:
+    """Reconstructs the graph statistics dictionary from a flat array.
+
+    Args:
+        flat_arr: A 1D float64 NumPy array containing concatenated statistics.
+        structure: A dictionary mapping keys to their original sizes.
+    Returns:
+        The reconstructed statistics dictionary.
+    """
+    per_graph_statistics: dict[str, Any] = {}
+    current_idx = 0
+    
+    discrete_keys: set[str] = {"n_nodes", "n_edges"}
+
+    for key, size in structure.items():
+        if size == 0:
+            per_graph_statistics[key] = None
+            continue
+
+        segment = flat_arr[current_idx : current_idx + size]
+        if size == 1:
+            val = segment[0].item()
+            # Cast discrete features back to int
+            per_graph_statistics[key] = int(round(val)) if key in discrete_keys else float(val)
+        else:
+            per_graph_statistics[key] = segment.tolist()
+
+        current_idx += size
+
+    return per_graph_statistics
+
+
 def get_target_stats(dataset_obj: DatasetPT, idx: int) -> dict[str, Any]:
     """Retrieves target statistics (nodes, edges, moments) for a graph from .pt metadata.
     
@@ -396,6 +458,34 @@ def preprocess_and_save_original_dataset(
     orig_stats = per_graph_statistics(original_data_list, show_progress=True)
     orig_agg = aggregate_statistics(orig_stats)
     
+    # --- Distributional Sampling Data Extraction ---
+    if len(orig_stats) > 0:
+        _, stat_structure = flatten_stats(orig_stats[0])
+    else:
+        stat_structure = {}
+
+    is_discrete_list = []
+    for k, size in stat_structure.items():
+        if k in ["n_nodes", "n_edges"]:
+            is_discrete_list.extend([True] * size)
+        else:
+            is_discrete_list.extend([False] * size)
+    is_discrete = np.array(is_discrete_list, dtype=bool)
+
+    per_class_stats = {}
+    for data, per_graph_stats in zip(original_data_list, orig_stats):
+        y_val = int(data.y.item())
+        
+        if y_val not in per_class_stats:
+            per_class_stats[y_val] = {"num_samples": 0, "stat_list": []}
+
+        flat_arr, _ = flatten_stats(per_graph_stats)
+        per_class_stats[y_val]["num_samples"] += 1
+        per_class_stats[y_val]["stat_list"].append(flat_arr)
+        
+    for y_val in per_class_stats:
+        per_class_stats[y_val]["stat_matrix"] = np.vstack(per_class_stats[y_val].pop("stat_list"))
+    
     orig_metadata = {
         "source": "original",
         "dataset_name": dataset_name,
@@ -405,6 +495,9 @@ def preprocess_and_save_original_dataset(
         "in_dim": in_dim,
         "per_graph_statistics": orig_stats,
         "aggregate_statistics": orig_agg,
+        "is_discrete": is_discrete,
+        "per_class_stats": per_class_stats,
+        "stat_structure": stat_structure,
     }
 
     save_synthetic_dataset(

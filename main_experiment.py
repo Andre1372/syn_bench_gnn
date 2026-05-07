@@ -52,6 +52,11 @@ def parse_arguments() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--use_distribution_sampling",
+        action="store_true",
+        help="Sample statistics from the per-class distribution of the dataset rather than replicating per-graph stats.",
+    )
+    parser.add_argument(
         "--methods",
         type=str,
         nargs="+",
@@ -215,6 +220,7 @@ def main() -> None:
                     project_root=project_root,
                     output_dir=output_dir,
                     num_workers=args.num_workers,
+                    use_distribution_sampling=args.use_distribution_sampling,
                 )
                 logger.info(f"Done: {args.num_synth_datasets} variants saved to {output_dir}")
     else:

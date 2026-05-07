@@ -26,8 +26,10 @@ from src.data_utils import (
     remove_features,
     compute_log_bin_edges,
     apply_log_bin_features,
+    unflatten_stats,
 )
 from src.graph_analysis import per_graph_statistics, aggregate_statistics
+from src.enc_dec_dataset import PercentileEncoderDecoder
 
 from src.padma.graph_generator import generate_graph as padma_generate_graph
 from src.ergm.graph_generator import ergm_fit_sample
@@ -176,6 +178,7 @@ def generate_synthetic_variants(
     project_root: Path,
     output_dir: Path,
     num_workers: int,
+    use_distribution_sampling: bool = False,
 ) -> None:
     """Generates V synthetic variants for a dataset using a given method and saves them to disk.
 
@@ -193,6 +196,7 @@ def generate_synthetic_variants(
         output_dir: Directory where the variant ``.pt`` files will be written.
             Created automatically if it does not exist.
         num_workers: Number of worker processes for parallel generation.
+        use_distribution_sampling: If True, samples stats from the per-class distribution.
     Raises:
         ValueError: If ``method`` is not a recognised generation method.
     """
@@ -202,7 +206,9 @@ def generate_synthetic_variants(
             f"Supported values: {sorted(KNOWN_METHODS)}."
         )
 
-    
+    if use_distribution_sampling and method in ["pdd", "ergm"]:
+        raise ValueError(f"Method '{method}' does not support distribution sampling as it requires 'observed_nx'.")
+
     orig_pt_path = project_root / "data" / dataset_name / f"{dataset_name}_original.pt"
     if not orig_pt_path.exists():
         preprocess_and_save_original_dataset(dataset_name, project_root / "data")
@@ -232,21 +238,58 @@ def generate_synthetic_variants(
 
     # Pre-collect all necessary data for workers to avoid passing the whole dataset_obj
     tasks = []
-    for i in range(len(dataset_obj)):
-        data = dataset_obj[i]
-        target_stats = get_target_stats(dataset_obj, i)
-        
-        obs_nx = None
-        if method == "pdd" or method == "ergm":
-            obs_nx = igraph_to_networkx(pytorch_to_igraph(data))
+    
+    if not use_distribution_sampling:
+        for i in range(len(dataset_obj)):
+            data = dataset_obj[i]
+            target_stats = get_target_stats(dataset_obj, i)
             
-        tasks.append({
-            'i': i,
-            'target_stats': target_stats,
-            'y': data.y,
-            'obs_nx': obs_nx,
-            'seeds': all_seeds[i],
-        })
+            obs_nx = None
+            if method == "pdd" or method == "ergm":
+                obs_nx = igraph_to_networkx(pytorch_to_igraph(data))
+                
+            tasks.append({
+                'i': i,
+                'target_stats': target_stats,
+                'y': data.y,
+                'obs_nx': obs_nx,
+                'seeds': all_seeds[i],
+            })
+    else:
+        # Use distributional sampling
+        is_discrete = metadata.get("is_discrete")
+        per_class_stats = metadata.get("per_class_stats")
+        stat_structure = metadata.get("stat_structure")
+        
+        if is_discrete is None or per_class_stats is None or stat_structure is None:
+            raise ValueError(f"Dataset {dataset_name} is missing distributional metadata. Re-run with --process_original.")
+            
+        encoder = PercentileEncoderDecoder(num_classes=metadata["num_classes"], is_discrete=is_discrete, rng=rng)
+        
+        # Encode features for all classes
+        for class_id_str, class_info in per_class_stats.items():
+            class_id = int(class_id_str)
+            stat_matrix = class_info["stat_matrix"]
+            encoder.encode_features(stat_matrix, class_id)
+            
+        for i in range(len(dataset_obj)):
+            data = dataset_obj[i]
+            y_val = int(data.y.item())
+            
+            # Sample a single row representing the stats of the i-th synthetic base graph
+            sampled_matrix = encoder.sample_features(num_samples=1, class_id=y_val)
+            flat_arr = sampled_matrix[0]
+            
+            # Reconstruct the dictionary format
+            target_stats = unflatten_stats(flat_arr, stat_structure)
+            
+            tasks.append({
+                'i': i,
+                'target_stats': target_stats,
+                'y': data.y,
+                'obs_nx': None,
+                'seeds': all_seeds[i],
+            })
 
     if num_workers > 1:
         logger.info(f"Generating synthetic variants in parallel using {num_workers} workers...")
