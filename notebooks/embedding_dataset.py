@@ -17,6 +17,7 @@ from scipy.stats import skew, kurtosis, wasserstein_distance
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import roc_auc_score, accuracy_score
+from tqdm.auto import tqdm
 
 # Ensure project root is in path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent if "__file__" in globals() else Path(".").resolve().parent
@@ -415,3 +416,197 @@ display(df_adv_summary)
 
 final_avg_auc = df_adv_summary.loc["MEAN", "Discriminator_AUC"]
 print(f"\n>>> FINAL DISCRIMINATOR AUC: {final_avg_auc:.4f} (Closer to 0.5 is better) <<<")
+
+
+
+# Cell 6 - Encoder/Decoder Benchmark Comparison
+N_REPEATS = 5
+
+def _make_encoder_decoder_configs(num_classes: int) -> list[tuple[str, "FeatureEncoderDecoder"]]:
+    """Instantiates all encoder/decoder variants to benchmark."""
+    rng = np.random.default_rng(seed=0)
+    return [
+        ("Moments", MomentsEncoderDecoder(num_classes=num_classes, is_discrete=IS_DISCRETE, k=4, rng=rng)),
+        ("Percentile(no_corr)",PercentileEncoderDecoder(num_classes=num_classes, is_discrete=IS_DISCRETE, percentile_size=0.1, replicate_correlation=False, rng=rng)),
+        ("Percentile(corr)",PercentileEncoderDecoder(num_classes=num_classes, is_discrete=IS_DISCRETE, percentile_size=0.1, replicate_correlation=True, rng=rng)),
+        ("GMCM", GMCMEncoderDecoder(num_classes=num_classes, is_discrete=IS_DISCRETE, percentile_size=0.1, n_components=10, rng=rng)),
+    ]
+
+
+def _compute_mean_wasserstein_per_class(df_orig_cls: pd.DataFrame, df_synth_cls: pd.DataFrame) -> float:
+    """Mean Wasserstein distance across all marginal distributions for a single class.
+
+    Applies anchored Min-Max scaling (from the original distribution) so that
+    all features contribute on a comparable scale.
+
+    Args:
+        df_orig_cls: Original statistics DataFrame (single class).
+        df_synth_cls: Synthetic statistics DataFrame (single class).
+    Returns:
+        Mean Wasserstein distance across all features.
+    """
+    distances = []
+    for feat in FEATURES:
+        orig_vals = df_orig_cls[feat].values.astype(float)
+        synth_vals = df_synth_cls[feat].values.astype(float)
+        min_val, max_val = orig_vals.min(), orig_vals.max()
+        range_val = max_val - min_val
+        if range_val > 0:
+            orig_scaled = (orig_vals - min_val) / range_val
+            synth_scaled = (synth_vals - min_val) / range_val
+        else:
+            orig_scaled = orig_vals - min_val
+            synth_scaled = synth_vals - min_val
+        distances.append(wasserstein_distance(orig_scaled, synth_scaled))
+    return float(np.mean(distances))
+
+
+def _compute_correlation_mae_per_class(df_orig_cls: pd.DataFrame, df_synth_cls: pd.DataFrame) -> float:
+    """Mean absolute error on the Pearson correlation matrix for a single class.
+
+    Computes the global correlation matrix for original and synthetic samples,
+    takes the element-wise absolute difference, and returns its mean.
+
+    Args:
+        df_orig_cls: Original statistics DataFrame (single class).
+        df_synth_cls: Synthetic statistics DataFrame (single class).
+    Returns:
+        Mean absolute element-wise correlation error.
+    """
+    corr_orig = df_orig_cls[FEATURES].corr().fillna(0).values
+    corr_synth = df_synth_cls[FEATURES].corr().fillna(0).values
+    return float(np.abs(corr_synth - corr_orig).mean())
+
+
+def _compute_discriminator_auc_per_class(df_orig_cls: pd.DataFrame, df_synth_cls: pd.DataFrame) -> float:
+    """AUC-ROC of a Random Forest discriminator (original vs synthetic) for a single class.
+
+    Trains the classifier on 70 % of pooled data and evaluates on the remaining
+    30 %. Returns NaN when samples are insufficient for a stratified split.
+
+    Args:
+        df_orig_cls: Original statistics DataFrame (single class).
+        df_synth_cls: Synthetic statistics DataFrame (single class).
+    Returns:
+        AUC-ROC score (closer to 0.5 means synthetic and original are indistinguishable).
+    """
+    df_o = df_orig_cls[FEATURES].copy()
+    df_o["label"] = 0
+    df_s = df_synth_cls[FEATURES].copy()
+    df_s["label"] = 1
+    df_combined = pd.concat([df_o, df_s], ignore_index=True)
+    X = df_combined[FEATURES].values
+    y = df_combined["label"].values
+
+    if len(np.unique(y)) < 2 or len(y) < 6:
+        return float("nan")
+
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y, test_size=0.3, random_state=42, stratify=y
+    )
+    clf = RandomForestClassifier(n_estimators=100, max_depth=5, random_state=42, n_jobs=-1)
+    clf.fit(X_train, y_train)
+
+    if len(np.unique(y_test)) < 2:
+        return float("nan")
+
+    return float(roc_auc_score(y_test, clf.predict_proba(X_test)[:, 1]))
+
+
+def _run_single_repeat(enc_dec: "FeatureEncoderDecoder", df_dataset: pd.DataFrame, class_id: int) -> dict:
+    """One encode-decode cycle for a (enc_dec, class_id) pair; returns raw metrics.
+
+    Args:
+        enc_dec: Encoder/decoder instance to evaluate.
+        df_dataset: Full dataset DataFrame for one dataset name.
+        class_id: The class ID to encode and then sample from.
+    Returns:
+        Dict with keys 'wasserstein', 'corr_mae', 'auc_roc'.
+    """
+    df_cls = df_dataset[df_dataset["class_id"] == class_id]
+    stat_matrix = df_cls[FEATURES].values
+
+    enc_dec.encode_features(stat_matrix, int(class_id))
+
+    samples_matrix = enc_dec.sample_features(len(df_cls), int(class_id))
+    df_synth_cls = pd.DataFrame(samples_matrix, columns=FEATURES)
+    df_synth_cls[DISCRETE_FEATURES] = df_synth_cls[DISCRETE_FEATURES].astype(int)
+
+    return {
+        "wasserstein": _compute_mean_wasserstein_per_class(df_cls, df_synth_cls),
+        "corr_mae": _compute_correlation_mae_per_class(df_cls, df_synth_cls),
+        "auc_roc": _compute_discriminator_auc_per_class(df_cls, df_synth_cls),
+    }
+
+
+def run_benchmark(df: pd.DataFrame, datasets: list[str]) -> pd.DataFrame:
+    """Full benchmark over all encoder/decoder classes, datasets, and class IDs."""
+    num_classes = int(df["class_id"].max() + 1)
+    rows = []
+
+    # Prepare all triplets for progress bar
+    tasks = []
+    for dataset_name in datasets:
+        df_dataset = df[df["dataset"] == dataset_name]
+        class_ids = sorted(df_dataset["class_id"].unique())
+        enc_dec_configs = _make_encoder_decoder_configs(num_classes)
+        for enc_dec_label, enc_dec in enc_dec_configs:
+            for class_id in class_ids:
+                tasks.append((dataset_name, enc_dec_label, enc_dec, class_id))
+
+    for dataset_name, enc_dec_label, enc_dec, class_id in tqdm(tasks, desc="Benchmarking Encoders"):
+        df_dataset = df[df["dataset"] == dataset_name].copy()
+        repeat_metrics: list[dict] = []
+        for rep in range(N_REPEATS):
+            try:
+                metrics = _run_single_repeat(enc_dec, df_dataset, class_id)
+                repeat_metrics.append(metrics)
+            except Exception as exc:
+                print(
+                    f"  [WARN] {dataset_name} | {enc_dec_label} | class={class_id} | rep={rep}: {exc}"
+                )
+
+        if not repeat_metrics:
+            continue
+
+        mean_wasserstein = float(np.mean([m["wasserstein"] for m in repeat_metrics]))
+        mean_corr_mae = float(np.mean([m["corr_mae"] for m in repeat_metrics]))
+        valid_aucs = [m["auc_roc"] for m in repeat_metrics if not np.isnan(m["auc_roc"])]
+        mean_auc_roc = float(np.mean(valid_aucs)) if valid_aucs else float("nan")
+
+        rows.append(
+            {
+                "dataset_name": dataset_name,
+                "enc_dec": enc_dec_label,
+                "class_id": int(class_id),
+                "mean_wasserstein": mean_wasserstein,
+                "mean_corr_mae": mean_corr_mae,
+                "mean_auc_roc": mean_auc_roc,
+            }
+        )
+
+    return pd.DataFrame(rows)
+
+
+df_benchmark = run_benchmark(df, DATASETS)
+
+# --- Full triplet-level results ---
+print("\n" + "=" * 100)
+print("FULL BENCHMARK RESULTS  (dataset_name, enc_dec, class_id)")
+print("=" * 100)
+display(df_benchmark)
+
+# --- Aggregated summary by encoder/decoder ---
+num_classes = int(df["class_id"].max() + 1)
+model_order = [cfg[0] for cfg in _make_encoder_decoder_configs(num_classes)]
+
+df_bench_agg = (
+    df_benchmark
+    .groupby("enc_dec")[["mean_wasserstein", "mean_corr_mae", "mean_auc_roc"]]
+    .mean()
+    .reindex(model_order)
+)
+print("\n" + "=" * 100)
+print("AGGREGATED SUMMARY (mean across all datasets and classes)")
+print("=" * 100)
+display(df_bench_agg)
