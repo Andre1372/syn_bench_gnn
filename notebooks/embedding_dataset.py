@@ -24,7 +24,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.data_utils import DatasetPT
-from src.enc_dec_dataset import MomentsEncoderDecoder, PercentileEncoderDecoder
+from src.enc_dec_dataset import MomentsEncoderDecoder, PercentileEncoderDecoder, GMCMEncoderDecoder
 
 
 
@@ -81,7 +81,8 @@ display(df.head(10))
 # Initialize Encoder/Decoder with the correct number of classes and discrete info
 num_classes = int(df["class_id"].max() + 1)
 # ENC_DEC = MomentsEncoderDecoder(num_classes=num_classes, is_discrete=IS_DISCRETE, k=4, rng=RNG)
-ENC_DEC = PercentileEncoderDecoder(num_classes=num_classes, is_discrete=IS_DISCRETE, percentile_size=0.1, replicate_correlation=False, rng=RNG)
+# ENC_DEC = PercentileEncoderDecoder(num_classes=num_classes, is_discrete=IS_DISCRETE, percentile_size=0.1, replicate_correlation=True, rng=RNG)
+ENC_DEC = GMCMEncoderDecoder(num_classes=num_classes, is_discrete=IS_DISCRETE, percentile_size=0.1, n_components=3, rng=RNG)
 
 DATASETS = [d for d in DATASET_NAMES if d in df["dataset"].unique()]
 
@@ -135,6 +136,9 @@ for dataset_name in DATASETS:
     dataset_samples.append(df_s)
     
     print(f"\n--- {dataset_name} ---")
+    # Get embedding size for the first class (all classes have same embedding size)
+    emb_size = ENC_DEC.get_embedding(df_subset["class_id"].iloc[0]).shape[0]
+    print(f"Embedding vector dimension: {emb_size}")
     display(df_emb.head())
     display(df_s.head())
 

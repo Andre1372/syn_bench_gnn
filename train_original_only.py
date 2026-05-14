@@ -59,6 +59,8 @@ def main() -> None:
             "num_layers": 3,
             "dropout"   : 0.1,
             "num_classes": orig_dataset_obj.metadata.get("num_classes"),
+            "epochs"    : 50,
+            "batch_size": 16,
         }
         
         # Shared train/val/test split (fixed for comparability)
@@ -74,8 +76,6 @@ def main() -> None:
                     device=device,
                     split_indices=split_indices,
                     dataset_name=dataset_name,
-                    epochs=50,
-                    batch_size=16,
                     pbar=pbar,
                 )
         

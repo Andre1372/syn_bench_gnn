@@ -37,7 +37,7 @@ def parse_arguments() -> argparse.Namespace:
         "--dataset",
         type=str,
         nargs="+",
-        default=["all"],
+        default=ALL_DATASETS,
         help="One or more TUDataset names to use as baseline (e.g. PROTEINS MUTAG). Use 'all' (default) to process all datasets in the data/ folder.",
     )
     parser.add_argument(
@@ -79,23 +79,11 @@ def parse_arguments() -> argparse.Namespace:
         help="Pre-process (and sample) the original dataset even if it exists. Also enables evaluation.",
     )
     parser.add_argument(
-        "--epochs",
-        type=int,
-        default=50,
-        help="Number of GNN training epochs.",
-    )
-    parser.add_argument(
         "--gnn_runs",
         "-R",
         type=int,
         default=10,
         help="Number of independent GNN training runs per dataset for variance estimation.",
-    )
-    parser.add_argument(
-        "--batch_size",
-        type=int,
-        default=16,
-        help="Batch size for GNN training and evaluation.",
     )
 
     # Infrastructure
@@ -163,10 +151,6 @@ def main() -> None:
     args = parse_arguments()
 
     project_root = Path(".")
-    
-    # Handle "all" dataset selection
-    if "all" in args.dataset:
-        args.dataset = ALL_DATASETS
 
     n_datasets = len(args.dataset)
     n_methods = len(args.methods)
@@ -241,13 +225,14 @@ def main() -> None:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     logger.info(f"Using device: {device}")
 
-    test_epochs = 1 if args.quick_test else args.epochs
     gnn_config_base = {
         "num_runs"  : 1 if args.quick_test else args.gnn_runs,
         "lr"        : 5e-4,
         "hidden_dim": 16 if args.quick_test else 256,
         "num_layers": 1 if args.quick_test else 3,
         "dropout"   : 0.1,
+        "epochs"    : 1 if args.quick_test else 50,
+        "batch_size": 16,
     }
 
     for dataset_name in args.dataset:
@@ -295,8 +280,6 @@ def main() -> None:
                         device=device,
                         split_indices=split_indices,
                         dataset_name=dataset_name,
-                        epochs=test_epochs,
-                        batch_size=args.batch_size,
                         pbar=pbar,
                     )
             _write_csv(glob_res, results_dir / f"gnn_eval_{dataset_name}_original.csv")
@@ -329,8 +312,6 @@ def main() -> None:
                             device=device,
                             split_indices=split_indices,
                             dataset_name=dataset_name,
-                            epochs=test_epochs,
-                            batch_size=args.batch_size,
                             pbar=pbar,
                         )
                         all_results.extend(glob_res)

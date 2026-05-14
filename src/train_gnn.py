@@ -298,8 +298,6 @@ def evaluate_dataset(
     device: torch.device,
     split_indices: tuple[list[int], list[int], list[int]],
     dataset_name: str,
-    epochs: int,
-    batch_size: int,
     pbar: Any = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Runs a full suite of GNN evaluations loading data from a .pt file.
@@ -310,8 +308,6 @@ def evaluate_dataset(
         device: Torch device to run training on.
         split_indices: Pre-computed ``(train_idx, val_idx, test_idx)`` index lists.
         dataset_name: Dataset name written verbatim to each result row.
-        epochs: Number of training epochs per GNN run.
-        batch_size: Mini-batch size for DataLoaders.
         pbar: Optional tqdm progress bar to update (one step per run).
     Returns:
         A tuple containing:
@@ -376,13 +372,13 @@ def evaluate_dataset(
                 dataset=data_list,
                 run_id=run_id,
                 device=device,
-                epochs=epochs,
-                batch_size=batch_size,
+                epochs=gnn_config["epochs"],
+                batch_size=gnn_config["batch_size"],
                 lr=gnn_config["lr"],
                 split_indices=split_indices,
             )
 
-            n_correct[model_name] += get_per_graph_predictions(model, data_list, device, batch_size)
+            n_correct[model_name] += get_per_graph_predictions(model, data_list, device, gnn_config["batch_size"])
 
             global_results.append({
                 "dataset": dataset_name,

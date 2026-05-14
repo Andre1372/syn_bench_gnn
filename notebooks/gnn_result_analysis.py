@@ -66,7 +66,7 @@ def get_degree_sequence(dataset_path: str | Path, idx: int) -> np.ndarray | None
 # Cell 1 - Global Variables & Data Loading
 RESULTS_DIR = PROJECT_ROOT / "results"
 DATASET_NAMES = [
-        "BZR", "DHFR", "Mutagenicity", "MUTAG", #"AIDS", "IMDB-BINARY", "NCI1", "PROTEINS"
+        "BZR", "DHFR", "Mutagenicity", "MUTAG", "AIDS", "PROTEINS", "Letter-low", "Letter-med"
         # "MUTAG"
     ]
 BASE_METHOD_ORDER = ["dummyNodes", "dummyEdges", "padma", "anndg", "anndgD", "anndgE", "anndgED"]

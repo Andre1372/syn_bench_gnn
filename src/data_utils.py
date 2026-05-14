@@ -288,8 +288,8 @@ def flatten_stats(per_graph_statistics: dict[str, Any]) -> tuple[np.ndarray, dic
     parts: list[np.ndarray] = []
     structure: dict[str, int] = {}
 
-    stat_keys: list[str] = ["n_nodes", "n_edges", "diameter", "degree_moments", "annd", "eccentricity"]
-
+    stat_keys: list[str] = ["n_nodes", "n_edges", "degree_moments", "annd", "eccentricity"]
+    
     for key in stat_keys:
         val = per_graph_statistics.get(key)
         if val is None:
@@ -457,8 +457,8 @@ def preprocess_and_save_original_dataset(
     from src.graph_analysis import per_graph_statistics, aggregate_statistics
     orig_stats = per_graph_statistics(original_data_list, show_progress=True)
     orig_agg = aggregate_statistics(orig_stats)
-    
     # --- Distributional Sampling Data Extraction ---
+    
     if len(orig_stats) > 0:
         _, stat_structure = flatten_stats(orig_stats[0])
     else:
@@ -475,14 +475,14 @@ def preprocess_and_save_original_dataset(
     per_class_stats = {}
     for data, per_graph_stats in zip(original_data_list, orig_stats):
         y_val = int(data.y.item())
-        
+
         if y_val not in per_class_stats:
             per_class_stats[y_val] = {"num_samples": 0, "stat_list": []}
 
         flat_arr, _ = flatten_stats(per_graph_stats)
         per_class_stats[y_val]["num_samples"] += 1
         per_class_stats[y_val]["stat_list"].append(flat_arr)
-        
+
     for y_val in per_class_stats:
         per_class_stats[y_val]["stat_matrix"] = np.vstack(per_class_stats[y_val].pop("stat_list"))
     

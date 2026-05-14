@@ -29,7 +29,7 @@ from src.data_utils import (
     unflatten_stats,
 )
 from src.graph_analysis import per_graph_statistics, aggregate_statistics
-from src.enc_dec_dataset import PercentileEncoderDecoder
+from src.enc_dec_dataset import GMCMEncoderDecoder
 
 from src.padma.graph_generator import generate_graph as padma_generate_graph
 from src.ergm.graph_generator import ergm_fit_sample
@@ -250,7 +250,7 @@ def generate_synthetic_variants(
                 
             tasks.append({
                 'i': i,
-                'target_stats': target_stats,
+                'target_stats': [target_stats] * num_variants,
                 'y': data.y,
                 'obs_nx': obs_nx,
                 'seeds': all_seeds[i],
@@ -264,7 +264,7 @@ def generate_synthetic_variants(
         if is_discrete is None or per_class_stats is None or stat_structure is None:
             raise ValueError(f"Dataset {dataset_name} is missing distributional metadata. Re-run with --process_original.")
             
-        encoder = PercentileEncoderDecoder(num_classes=metadata["num_classes"], is_discrete=is_discrete, rng=rng)
+        encoder = GMCMEncoderDecoder(num_classes=metadata["num_classes"], is_discrete=is_discrete, rng=rng)
         
         # Encode features for all classes
         for class_id_str, class_info in per_class_stats.items():
@@ -276,16 +276,17 @@ def generate_synthetic_variants(
             data = dataset_obj[i]
             y_val = int(data.y.item())
             
-            # Sample a single row representing the stats of the i-th synthetic base graph
-            sampled_matrix = encoder.sample_features(num_samples=1, class_id=y_val)
-            flat_arr = sampled_matrix[0]
+            # Sample num_variants rows representing the stats for each variant
+            sampled_matrix = encoder.sample_features(num_samples=num_variants, class_id=y_val)
             
-            # Reconstruct the dictionary format
-            target_stats = unflatten_stats(flat_arr, stat_structure)
+            target_stats_list = []
+            for v in range(num_variants):
+                flat_arr = sampled_matrix[v]
+                target_stats_list.append(unflatten_stats(flat_arr, stat_structure))
             
             tasks.append({
                 'i': i,
-                'target_stats': target_stats,
+                'target_stats': target_stats_list,
                 'y': data.y,
                 'obs_nx': None,
                 'seeds': all_seeds[i],
@@ -387,13 +388,10 @@ def _worker_generate_variants(task, method, num_variants):
     torch.set_num_threads(1)
     
     i = task['i']
-    target_stats = task['target_stats']
+    target_stats_list = task['target_stats']
     y = task['y']
     obs_nx = task['obs_nx']
     seeds_list = task['seeds']
-
-    if obs_nx is not None:
-        target_stats["observed_nx"] = obs_nx
         
     graphs = []
     seeds = []
@@ -401,6 +399,10 @@ def _worker_generate_variants(task, method, num_variants):
     errors = []
     for v in range(num_variants):
         current_seed = seeds_list[v]
+        target_stats = target_stats_list[v]
+        
+        if obs_nx is not None:
+            target_stats["observed_nx"] = obs_nx
         try:
             synth_nx, info = generate_graph(target_stats, method, np.random.default_rng(current_seed))
             synth_ig = networkx_to_igraph(synth_nx)

@@ -14,6 +14,7 @@ import pandas as pd
 import scipy.stats
 from scipy.optimize import minimize
 from scipy.stats import kurtosis, skew
+from sklearn.mixture import GaussianMixture
 
 
 class FeatureEncoderDecoder(ABC):
@@ -48,6 +49,16 @@ class FeatureEncoderDecoder(ABC):
             class_id: The ID of the class to sample from.
         Returns:
             Matrix of shape (num_samples, num_features).
+        """
+
+    @abstractmethod
+    def get_embedding(self, class_id: int) -> np.ndarray:
+        """Returns the full embedding vector for a class.
+
+        Args:
+            class_id: The ID of the class to get the embedding for.
+        Returns:
+            Flattened 1D numpy array representing the learned parameters.
         """
 
 
@@ -196,6 +207,21 @@ class MomentsEncoderDecoder(FeatureEncoderDecoder):
 
         return np.polyval(res.x[::-1], z_noise)
 
+    def get_embedding(self, class_id: int) -> np.ndarray:
+        """Returns the full embedding vector for a class.
+
+        Args:
+            class_id: The ID of the class to get the embedding for.
+        Returns:
+            Flattened 1D numpy array representing the learned parameters.
+        """
+        if class_id >= len(self._encodings):
+            raise ValueError(f"class_id {class_id} out of bounds (0-{len(self._encodings)-1}).")
+        if self._encodings[class_id] is None:
+            raise ValueError(f"Class {class_id} must be encoded before getting embedding.")
+        
+        return self._encodings[class_id].flatten()
+
 
 class PercentileEncoderDecoder(FeatureEncoderDecoder):
     """Implementation of FeatureEncoderDecoder using percentiles.
@@ -298,3 +324,166 @@ class PercentileEncoderDecoder(FeatureEncoderDecoder):
             samples_matrix[:, discrete_mask] = np.round(np.maximum(0, samples_matrix[:, discrete_mask]))
             
         return samples_matrix
+
+    def get_embedding(self, class_id: int) -> np.ndarray:
+        """Returns the full embedding vector for a class.
+
+        Args:
+            class_id: The ID of the class to get the embedding for.
+        Returns:
+            Flattened 1D numpy array representing the learned parameters.
+        """
+        if class_id >= len(self._encodings):
+            raise ValueError(f"class_id {class_id} out of bounds (0-{len(self._encodings)-1}).")
+        if self._encodings[class_id] is None:
+            raise ValueError(f"Class {class_id} must be encoded before getting embedding.")
+            
+        parts = [self._encodings[class_id].flatten()]
+        if self.replicate_correlation and self._corr_matrices[class_id] is not None:
+            corr_mat = self._corr_matrices[class_id]
+            parts.append(corr_mat[np.triu_indices_from(corr_mat)])
+            
+        return np.concatenate(parts)
+
+
+class GMCMEncoderDecoder(FeatureEncoderDecoder):
+    """Implementation of FeatureEncoderDecoder using Gaussian Mixture Copula Models (GMCM).
+
+    This class captures the complex joint distribution of features using a GMM in the
+    latent normal space, after transforming the original marginals to uniform via percentiles.
+    """
+
+    def __init__(self, num_classes: int, is_discrete: np.ndarray, percentile_size: float = 0.1, n_components: int = 10, rng: np.random.Generator | None = None) -> None:
+        """Initializes the encoder with the percentile size, number of components, and random generator.
+
+        Args:
+            num_classes: Number of classes in the dataset.
+            is_discrete: Boolean array of shape (num_features,).
+            percentile_size: The size of the percentile steps (between 0 and 1).
+            n_components: Number of Gaussian mixture components in the latent space.
+            rng: NumPy random generator instance.
+        """
+        super().__init__(num_classes, is_discrete, rng)
+        if not 0 < percentile_size <= 1:
+            raise ValueError(f"percentile_size must be between 0 and 1, got {percentile_size}.")
+        self.percentile_size = percentile_size
+        self.n_components = n_components
+        self._gmm_models: list[GaussianMixture | None] = [None] * num_classes
+
+    def encode_features(self, stat_matrix: np.ndarray, class_id: int) -> None:
+        """Computes percentiles for marginals and fits a GMM on the latent normal space.
+
+        Args:
+            stat_matrix: Matrix of shape (num_samples, num_features).
+            class_id: The ID of the class being encoded.
+        """
+        if not 0 <= class_id < len(self._encodings):
+            raise ValueError(f"class_id {class_id} out of bounds (0-{len(self._encodings)-1}).")
+
+        # Determine quantile grid
+        q = np.arange(0, 1 + (self.percentile_size / 2), self.percentile_size)
+        q[q > 1.0] = 1.0
+        if q[-1] < 1.0: q = np.append(q, 1.0)
+            
+        # Apply jittering to discrete columns in one go to smooth them
+        working_matrix = stat_matrix.astype(float).copy()
+        if np.any(self._is_discrete):
+            discrete_mask = self._is_discrete.astype(bool)
+            jitter = self.rng.uniform(-0.5, 0.5, size=(working_matrix.shape[0], np.sum(discrete_mask)))
+            working_matrix[:, discrete_mask] += jitter
+            
+        # Vectorized quantile computation across all features (axis=0)
+        # Shape: (num_percentiles, num_features)
+        percentiles = np.quantile(working_matrix, q, axis=0)
+        self._encodings[class_id] = percentiles
+        
+        # --- PHASE LATENT SPACE: PIT to Uniform, then to Normal ---
+        num_percentiles, num_features = percentiles.shape
+        q_uniform = np.linspace(0, 1, num_percentiles)
+        u = np.zeros_like(working_matrix)
+        
+        for i in range(num_features):
+            u[:, i] = np.interp(working_matrix[:, i], percentiles[:, i], q_uniform)
+            
+        # Clip to avoid infinite values in the inverse normal CDF
+        eps = 1e-6
+        u = np.clip(u, eps, 1 - eps)
+        
+        z = scipy.stats.norm.ppf(u)
+        
+        # --- PHASE COPULA: Fit GMM ---
+        random_state = int(self.rng.integers(0, 10000)) if self.rng else 42
+        gmm = GaussianMixture(n_components=self.n_components, covariance_type='full', random_state=random_state)
+        gmm.fit(z)
+        self._gmm_models[class_id] = gmm
+
+    def sample_features(self, num_samples: int, class_id: int) -> np.ndarray:
+        """Generates samples by sampling from GMM and applying inverse PIT.
+
+        Args:
+            num_samples: Number of samples to generate.
+            class_id: The ID of the class to sample from.
+            
+        Returns:
+            Matrix of shape (num_samples, num_features).
+        """
+        if class_id >= len(self._encodings):
+            raise ValueError(f"class_id {class_id} out of bounds (0-{len(self._encodings)-1}).")
+        if self._encodings[class_id] is None or self._gmm_models[class_id] is None:
+            raise ValueError(f"Class {class_id} must be encoded before sampling.")
+            
+        encoding_matrix = self._encodings[class_id]
+        num_percentiles, num_features = encoding_matrix.shape
+        q_grid = np.linspace(0, 1, num_percentiles)
+
+        # --- PHASE COPULA: Sample from GMM and transform to uniform ---
+        gmm = self._gmm_models[class_id]
+        z_sample, _ = gmm.sample(num_samples)
+        u = scipy.stats.norm.cdf(z_sample)
+        
+        # --- PHASE MARGINALS: Inverse PIT ---
+        # Find indices of the bins for each sample in u
+        idx = np.searchsorted(q_grid, u) - 1
+        idx = np.clip(idx, 0, num_percentiles - 2)
+        
+        # Vectorized linear interpolation: y = y0 + (y1 - y0) * (x - x0) / (x1 - x0)
+        v0 = np.take_along_axis(encoding_matrix, idx, axis=0)
+        v1 = np.take_along_axis(encoding_matrix, idx + 1, axis=0)
+        
+        q0 = q_grid[idx]
+        q1 = q_grid[idx + 1]
+        
+        samples_matrix = v0 + (v1 - v0) * (u - q0) / (q1 - q0)
+        
+        # Post-process discrete features
+        if np.any(self._is_discrete):
+            discrete_mask = self._is_discrete.astype(bool)
+            samples_matrix[:, discrete_mask] = np.round(np.maximum(0, samples_matrix[:, discrete_mask]))
+            
+        return samples_matrix
+
+    def get_embedding(self, class_id: int) -> np.ndarray:
+        """Returns the full embedding vector for a class.
+
+        Args:
+            class_id: The ID of the class to get the embedding for.
+        Returns:
+            Flattened 1D numpy array representing the learned parameters.
+        """
+        if class_id >= len(self._encodings):
+            raise ValueError(f"class_id {class_id} out of bounds (0-{len(self._encodings)-1}).")
+        if self._encodings[class_id] is None or self._gmm_models[class_id] is None:
+            raise ValueError(f"Class {class_id} must be encoded before getting embedding.")
+            
+        gmm = self._gmm_models[class_id]
+        parts = [
+            self._encodings[class_id].flatten(),
+            gmm.weights_.flatten(),
+            gmm.means_.flatten(),
+        ]
+        # Append only the upper triangle of each covariance matrix
+        for i in range(gmm.covariances_.shape[0]):
+            cov_mat = gmm.covariances_[i]
+            parts.append(cov_mat[np.triu_indices_from(cov_mat)])
+            
+        return np.concatenate(parts)
