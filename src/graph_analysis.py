@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 def aggregate_statistics(per_graph_stats: list[dict[str, Any]]) -> dict[str, Any]:
     """Computes the mean for network statistics across the dataset.
     
-    Handles both scalar values and vectors (like ANND) of inhomogeneous lengths.
+    Handles both scalar values and vectors.
     Safely ignores missing keys in individual graph dictionaries.
 
     Args:
@@ -38,19 +38,11 @@ def aggregate_statistics(per_graph_stats: list[dict[str, Any]]) -> dict[str, Any
         
         if not values: continue
 
-        # Handle numeric arrays (ANND, degree moments)
+        # Handle numeric arrays
         if isinstance(values[0], np.ndarray):
-
-            # For variable length vectors (ANND)
-            max_len = max(len(v) for v in values)
-            # Create a padded matrix with NaNs for alignment
-            padded = np.full((len(values), max_len), np.nan)
-            for i, v in enumerate(values):
-                padded[i, :len(v)] = v
-            
             # Compute element-wise mean across graphs, ignoring NaNs
             with np.errstate(divide='ignore', invalid='ignore'):
-                mean_vec = np.nanmean(padded, axis=0)
+                mean_vec = np.nanmean(values, axis=0)
             mean_stats[key] = np.nan_to_num(mean_vec, nan=0.0)
 
         else:

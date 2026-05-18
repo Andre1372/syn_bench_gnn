@@ -16,6 +16,7 @@ from tqdm.contrib.logging import logging_redirect_tqdm
 from src.log_utils import setup_console_logging
 from src.data_utils import load_all_synthetic_variants, get_split_indices, preprocess_and_save_original_dataset, DatasetPT
 from src.generate_datasets import generate_synthetic_variants, KNOWN_METHODS
+from src.enc_dec_dataset import KNOWN_SAMPLERS
 from src.train_gnn import evaluate_dataset
 
 ALL_DATASETS = [
@@ -52,9 +53,16 @@ def parse_arguments() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
-        "--use_distribution_sampling",
-        action="store_true",
-        help="Sample statistics from the per-class distribution of the dataset rather than replicating per-graph stats.",
+        "--distribution_sampler",
+        type=str,
+        default=None,
+        metavar="SAMPLER",
+        choices=list(KNOWN_SAMPLERS),
+        help=(
+            f"Encoder-decoder to use for distributional stat sampling. "
+            f"Supported: {', '.join(sorted(KNOWN_SAMPLERS))}. "
+            f"If omitted, per-graph statistics are replicated directly."
+        ),
     )
     parser.add_argument(
         "--methods",
@@ -204,7 +212,7 @@ def main() -> None:
                     project_root=project_root,
                     output_dir=output_dir,
                     num_workers=args.num_workers,
-                    use_distribution_sampling=args.use_distribution_sampling,
+                    distribution_sampler=args.distribution_sampler,
                 )
                 logger.info(f"Done: {args.num_synth_datasets} variants saved to {output_dir}")
     else:

@@ -6,7 +6,9 @@ implementation based on statistical moments.
 
 from __future__ import annotations
 
+import logging
 from abc import ABC, abstractmethod
+from functools import partial
 from typing import Callable, Final
 
 import numpy as np
@@ -15,6 +17,8 @@ import scipy.stats
 from scipy.optimize import minimize
 from scipy.stats import kurtosis, skew
 from sklearn.mixture import GaussianMixture
+
+logger = logging.getLogger(__name__)
 
 
 class FeatureEncoderDecoder(ABC):
@@ -68,7 +72,15 @@ class MomentsEncoderDecoder(FeatureEncoderDecoder):
     This class represents distributions using their first k moments (mean,
     variance, skewness, and kurtosis) and reconstructs samples via a polynomial
     transformation of standard normal noise.
+
+    The polynomial coefficients are found by Nelder-Mead on a large **surrogate**
+    noise vector (``_SURROGATE_SIZE`` points) so that optimisation converges
+    regardless of how small ``num_variants`` is.  The found coefficients are then
+    applied to the caller's z-noise of size V.  This preserves the interpretable
+    moment-based embedding while decoupling convergence from batch size.
     """
+
+    _SURROGATE_SIZE: int = 10_000  # size of the surrogate z-vector used during optimisation
 
     def __init__(self, num_classes: int, is_discrete: np.ndarray, k: int = 4, rng: np.random.Generator | None = None) -> None:
         """Initializes the encoder with the number of moments and a random generator.
@@ -91,16 +103,17 @@ class MomentsEncoderDecoder(FeatureEncoderDecoder):
         Args:
             stat_matrix: Matrix of shape (num_samples, num_features).
             class_id: The ID of the class being encoded.
+        Raises:
+            ValueError: If class_id is out of bounds.
         """
         if not 0 <= class_id < len(self._encodings):
             raise ValueError(f"class_id {class_id} out of bounds (0-{len(self._encodings)-1}).")
-        
-        # Vectorized moments calculation
+
         moments = [np.mean(stat_matrix, axis=0)]
         if self.k >= 2: moments.append(np.var(stat_matrix, axis=0))
         if self.k >= 3: moments.append(skew(stat_matrix, axis=0))
         if self.k >= 4: moments.append(kurtosis(stat_matrix, axis=0, fisher=False))
-        
+
         self._encodings[class_id] = np.array(moments)
 
     def sample_features(self, num_samples: int, class_id: int) -> np.ndarray:
@@ -111,24 +124,25 @@ class MomentsEncoderDecoder(FeatureEncoderDecoder):
             class_id: The ID of the class to sample from.
         Returns:
             Matrix of shape (num_samples, num_features).
+        Raises:
+            ValueError: If class_id is out of bounds or not yet encoded.
         """
         if class_id >= len(self._encodings):
             raise ValueError(f"class_id {class_id} out of bounds (0-{len(self._encodings)-1}).")
         if self._encodings[class_id] is None:
             raise ValueError(f"Class {class_id} must be encoded before sampling.")
-        
+
         encoding_matrix = self._encodings[class_id]
         num_features = encoding_matrix.shape[1]
-        # Optimization is performed per-feature
-        samples = [self._sample_single_feature(encoding_matrix[:, i], num_samples) for i in range(num_features)]
-        samples_matrix = np.column_stack(samples)
-        
-        # Post-process discrete features
+        samples = np.column_stack([
+            self._sample_single_feature(encoding_matrix[:, i], num_samples) for i in range(num_features)
+        ])
+
         if np.any(self._is_discrete):
             discrete_mask = self._is_discrete.astype(bool)
-            samples_matrix[:, discrete_mask] = np.round(np.maximum(0, samples_matrix[:, discrete_mask]))
-            
-        return samples_matrix
+            samples[:, discrete_mask] = np.round(np.maximum(0, samples[:, discrete_mask]))
+
+        return samples
 
     def _sample_single_feature(self, encoding: np.ndarray, num_samples: int) -> np.ndarray:
         """Generates samples for a single feature matching target moments.
@@ -143,69 +157,61 @@ class MomentsEncoderDecoder(FeatureEncoderDecoder):
         if num_moments == 0 or num_samples == 0:
             return np.array([])
 
-        # Base noise from a standard normal distribution
         z_noise = self.rng.standard_normal(num_samples)
 
-        # If k=1 (only mean), simply shift the sample
         if num_moments == 1:
             return z_noise - np.mean(z_noise) + encoding[0]
 
-        # If k=2 (mean and variance), standardize and scale (Z-score re-scaling)
         if num_moments == 2:
             z_std = (z_noise - np.mean(z_noise)) / (np.std(z_noise) + 1e-12)
             return z_std * np.sqrt(encoding[1]) + encoding[0]
 
-        # General case using optimization for k=3 and k=4
         if 3 <= num_moments <= 4:
             return self._optimize_polynomial_samples(z_noise, encoding)
 
         raise ValueError(f"Unsupported number of moments: {num_moments}.")
 
-    def _compute_moments(self, stat_values: np.ndarray) -> np.ndarray:
-        """Computes the first k moments of an array."""
-        if stat_values.size == 0: return np.zeros(self.k)
-
-        # Mapping of moment functions (Fisher=False for Pearson kurtosis)
-        moment_funcs = [np.mean, np.var, skew, lambda x: kurtosis(x, fisher=False)][:self.k]
-
-        return np.array([func(stat_values) for func in moment_funcs])
-
     def _optimize_polynomial_samples(self, z_noise: np.ndarray, target_moments: np.ndarray) -> np.ndarray:
         """Finds polynomial coefficients to match target moments.
 
+        Optimisation runs on a large surrogate vector (_SURROGATE_SIZE points)
+        so convergence is independent of the caller's batch size V.
+        The found coefficients are then applied to the original z_noise of size V.
+
         Args:
-            z_noise: Base normal noise.
-            target_moments: Target moments to match.
+            z_noise: Base normal noise of size V (potentially very small).
+            target_moments: Target moments [mean, var, skew, kurt].
         Returns:
-            Optimized sample array matching the moments.
+            Array of size V with values distributed according to target_moments.
         """
+        # Large surrogate vector: gives the optimiser enough statistical mass
+        # to estimate skewness and kurtosis reliably regardless of V.
+        z_surrogate = self.rng.standard_normal(self._SURROGATE_SIZE)
+
         def _loss_fn(coeffs: np.ndarray) -> float:
             """Internal loss to minimize moment discrepancy."""
-            # Use np.polyval with reversed coeffs to treat coeffs[i] as c_i for z^i
-            x_candidate = np.polyval(coeffs[::-1], z_noise)
+            x_candidate = np.polyval(coeffs[::-1], z_surrogate)
             current_moms = self._compute_moments(x_candidate)
-            # Weighted squared error to handle different scales of moments
             weights = 1.0 / (np.abs(target_moments) + 1e-5)
             return float(np.sum(((current_moms - target_moments) * weights) ** 2))
 
-        # Heuristic initialization: match mean and scale by standard deviation
         init_coeffs = np.zeros(self.k)
         init_coeffs[0] = target_moments[0]
         init_coeffs[1] = np.sqrt(max(target_moments[1], 1e-8))
 
-        # Check for mathematical feasibility of skewness/kurtosis combination
-        if self.k == 4:
-            target_skew, target_kurt = target_moments[2], target_moments[3]
-            if target_kurt < (target_skew**2 + 1):
-                # The optimizer will struggle as this violates mathematical limits
-                pass
-
         res = minimize(_loss_fn, init_coeffs, method="Nelder-Mead", options={"maxiter": 5000})
-
         if not res.success:
-            print(f"Warning: Optimizer failed to converge. Status: {res.message}")
+            logger.warning("MomentsEncoderDecoder: optimiser did not converge — %s", res.message)
 
+        # Apply the robustly-found coefficients to the original (small) z_noise.
         return np.polyval(res.x[::-1], z_noise)
+
+    def _compute_moments(self, stat_values: np.ndarray) -> np.ndarray:
+        """Computes the first k moments of an array."""
+        if stat_values.size == 0: return np.zeros(self.k)
+        
+        funcs = [np.mean, np.var, skew, lambda x: kurtosis(x, fisher=False)]
+        return np.array([f(stat_values) for f in funcs[: self.k]])
 
     def get_embedding(self, class_id: int) -> np.ndarray:
         """Returns the full embedding vector for a class.
@@ -213,7 +219,9 @@ class MomentsEncoderDecoder(FeatureEncoderDecoder):
         Args:
             class_id: The ID of the class to get the embedding for.
         Returns:
-            Flattened 1D numpy array representing the learned parameters.
+            Flattened 1D numpy array of the stored moments (interpretable descriptors).
+        Raises:
+            ValueError: If class_id is out of bounds or not yet encoded.
         """
         if class_id >= len(self._encodings):
             raise ValueError(f"class_id {class_id} out of bounds (0-{len(self._encodings)-1}).")
@@ -487,3 +495,11 @@ class GMCMEncoderDecoder(FeatureEncoderDecoder):
             parts.append(cov_mat[np.triu_indices_from(cov_mat)])
             
         return np.concatenate(parts)
+
+
+KNOWN_SAMPLERS: dict[str, Callable[..., FeatureEncoderDecoder]] = {
+    "gmcm": GMCMEncoderDecoder,
+    "moments": MomentsEncoderDecoder,
+    "percentile": partial(PercentileEncoderDecoder, replicate_correlation=False),
+    "percentile_corr": partial(PercentileEncoderDecoder, replicate_correlation=True),
+}

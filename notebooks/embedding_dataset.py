@@ -83,7 +83,7 @@ display(df.head(10))
 num_classes = int(df["class_id"].max() + 1)
 # ENC_DEC = MomentsEncoderDecoder(num_classes=num_classes, is_discrete=IS_DISCRETE, k=4, rng=RNG)
 # ENC_DEC = PercentileEncoderDecoder(num_classes=num_classes, is_discrete=IS_DISCRETE, percentile_size=0.1, replicate_correlation=True, rng=RNG)
-ENC_DEC = GMCMEncoderDecoder(num_classes=num_classes, is_discrete=IS_DISCRETE, percentile_size=0.1, n_components=3, rng=RNG)
+ENC_DEC = GMCMEncoderDecoder(num_classes=num_classes, is_discrete=IS_DISCRETE, percentile_size=0.1, n_components=10, rng=RNG)
 
 DATASETS = [d for d in DATASET_NAMES if d in df["dataset"].unique()]
 
@@ -536,6 +536,7 @@ def _run_single_repeat(enc_dec: "FeatureEncoderDecoder", df_dataset: pd.DataFram
         "wasserstein": _compute_mean_wasserstein_per_class(df_cls, df_synth_cls),
         "corr_mae": _compute_correlation_mae_per_class(df_cls, df_synth_cls),
         "auc_roc": _compute_discriminator_auc_per_class(df_cls, df_synth_cls),
+        "embedding_size": len(enc_dec.get_embedding(int(class_id))),
     }
 
 
@@ -573,12 +574,14 @@ def run_benchmark(df: pd.DataFrame, datasets: list[str]) -> pd.DataFrame:
         mean_corr_mae = float(np.mean([m["corr_mae"] for m in repeat_metrics]))
         valid_aucs = [m["auc_roc"] for m in repeat_metrics if not np.isnan(m["auc_roc"])]
         mean_auc_roc = float(np.mean(valid_aucs)) if valid_aucs else float("nan")
+        embedding_size = int(repeat_metrics[0]["embedding_size"])  # constant per (enc_dec, class_id)
 
         rows.append(
             {
                 "dataset_name": dataset_name,
                 "enc_dec": enc_dec_label,
                 "class_id": int(class_id),
+                "embedding_size": embedding_size,
                 "mean_wasserstein": mean_wasserstein,
                 "mean_corr_mae": mean_corr_mae,
                 "mean_auc_roc": mean_auc_roc,
@@ -602,8 +605,9 @@ model_order = [cfg[0] for cfg in _make_encoder_decoder_configs(num_classes)]
 
 df_bench_agg = (
     df_benchmark
-    .groupby("enc_dec")[["mean_wasserstein", "mean_corr_mae", "mean_auc_roc"]]
+    .groupby("enc_dec")[["embedding_size", "mean_wasserstein", "mean_corr_mae", "mean_auc_roc"]]
     .mean()
+    .astype({"embedding_size": int})
     .reindex(model_order)
 )
 print("\n" + "=" * 100)

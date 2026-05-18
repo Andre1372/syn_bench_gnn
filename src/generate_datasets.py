@@ -29,8 +29,7 @@ from src.data_utils import (
     unflatten_stats,
 )
 from src.graph_analysis import per_graph_statistics, aggregate_statistics
-from src.enc_dec_dataset import GMCMEncoderDecoder
-
+from src.enc_dec_dataset import FeatureEncoderDecoder, KNOWN_SAMPLERS
 from src.padma.graph_generator import generate_graph as padma_generate_graph
 from src.ergm.graph_generator import ergm_fit_sample
 from src.anndg.graph_generator import generate_graph as anndg_generate_graph
@@ -170,6 +169,99 @@ def generate_graph(target_stats: dict[str, Any], method: str, rng: np.random.Gen
         raise ValueError(f"Unknown method: {method}. Choose from {', '.join(KNOWN_METHODS)}.")
 
 
+# ---------------------------------------------------------------------------
+# Task-building helpers
+# ---------------------------------------------------------------------------
+
+def _build_tasks_direct(dataset_obj: "DatasetPT", method: str, num_variants: int, all_seeds: list[list[int]]) -> list[dict]:
+    """Builds per-graph tasks using the original (per-graph) statistics.
+
+    Args:
+        dataset_obj: The loaded original dataset.
+        method: Generation method name.
+        num_variants: Number of synthetic variants.
+        all_seeds: Pre-generated seeds, shape (n_graphs, num_variants).
+    Returns:
+        List of task dicts, one per graph.
+    """
+    tasks = []
+    needs_obs_nx = method in {"pdd", "ergm"}
+    for i in range(len(dataset_obj)):
+        data = dataset_obj[i]
+        target_stats = get_target_stats(dataset_obj, i)
+        obs_nx = igraph_to_networkx(pytorch_to_igraph(data)) if needs_obs_nx else None
+        tasks.append({
+            "i": i,
+            "target_stats": [target_stats] * num_variants,
+            "y": data.y,
+            "obs_nx": obs_nx,
+            "seeds": all_seeds[i],
+        })
+    return tasks
+
+
+def _build_tasks_distributional(dataset_obj: "DatasetPT", metadata: dict, num_variants: int, all_seeds: list[list[int]], encoder: "FeatureEncoderDecoder") -> list[dict]:
+    """Builds per-graph tasks sampling statistics from the per-class distribution.
+
+    Args:
+        dataset_obj: The loaded original dataset.
+        metadata: Dataset metadata containing distributional fields.
+        num_variants: Number of synthetic variants.
+        all_seeds: Pre-generated seeds, shape (n_graphs, num_variants).
+        encoder: A pre-fitted :class:`FeatureEncoderDecoder` instance.
+    Returns:
+        List of task dicts, one per graph.
+    Raises:
+        ValueError: If required distributional metadata fields are missing.
+    """
+    per_class_stats = metadata.get("per_class_stats")
+    stat_structure = metadata.get("stat_structure")
+
+    if per_class_stats is None or stat_structure is None:
+        raise ValueError("Dataset metadata is missing distributional fields ('per_class_stats', 'stat_structure'). Re-run with --process_original.")
+
+    for class_id_str, class_info in per_class_stats.items():
+        encoder.encode_features(class_info["stat_matrix"], int(class_id_str))
+
+    tasks = []
+    for i in range(len(dataset_obj)):
+        data = dataset_obj[i]
+        y_val = int(data.y.item())
+        sampled_matrix = encoder.sample_features(num_samples=num_variants, class_id=y_val)
+        target_stats_list = [unflatten_stats(sampled_matrix[v], stat_structure) for v in range(num_variants)]
+        tasks.append({
+            "i": i,
+            "target_stats": target_stats_list,
+            "y": data.y,
+            "obs_nx": None,
+            "seeds": all_seeds[i],
+        })
+    return tasks
+
+
+def _accumulate_result(result: tuple, method: str, num_variants: int, variant_datasets: list[list], variant_seeds: list[list], variant_infos: list[list]) -> None:
+    """Merges a single worker result into the per-variant accumulators.
+    Args:
+        result: Tuple (graph_idx, graphs, seeds, errors, infos) from a worker.
+        method: Generation method (used for logging).
+        num_variants: Number of variants.
+        variant_datasets: Accumulator list indexed by variant.
+        variant_seeds: Accumulator list indexed by variant.
+        variant_infos: Accumulator list indexed by variant.
+    """
+    i, graphs, seeds, errors, infos = result
+    for variant_idx, exc_msg in errors:
+        logger.error(f"Generation failed for graph {i} variant {variant_idx} (method={method}): {exc_msg}")
+    for v in range(num_variants):
+        variant_datasets[v].append(graphs[v])
+        variant_seeds[v].append(seeds[v])
+        variant_infos[v].append(infos[v])
+
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
+
 def generate_synthetic_variants(
     dataset_name: str,
     method: str,
@@ -178,194 +270,119 @@ def generate_synthetic_variants(
     project_root: Path,
     output_dir: Path,
     num_workers: int,
-    use_distribution_sampling: bool = False,
+    distribution_sampler: str | None = None,
 ) -> None:
-    """Generates V synthetic variants for a dataset using a given method and saves them to disk.
+    """Generates ``num_variants`` synthetic variants for a dataset and saves them to disk.
 
-    For every graph in the TUDataset the function runs the requested generation
-    method for each of the ``num_variants`` independent variants.  
-    Results are accumulated in-memory variant-by-variant and written to 
-    ``output_dir`` as ``.pt`` files via :func:`~src.data_utils.save_synthetic_dataset`.
+    For every graph in the preprocessed dataset the function runs the requested
+    generation method for each of the ``num_variants`` independent variants.
+    Results are accumulated in-memory, then written to ``output_dir`` as ``.pt``
+    files via :func:`~src.data_utils.save_synthetic_dataset`.
 
     Args:
         dataset_name: Name of the TUDataset (e.g. ``"PROTEINS"``).
-        method: Generation method.  One of ``'padma'``, ``'pdd'``, ``'dummyEdges'``.
+        method: Generation method — one of the values in :data:`KNOWN_METHODS`.
         num_variants: Number of independent synthetic variants ``V`` to produce.
         rng: A seeded (or unseeded) NumPy random generator.
-        project_root: Root directory of the project (used to locate configs).
+        project_root: Root directory of the project (used to locate the data).
         output_dir: Directory where the variant ``.pt`` files will be written.
             Created automatically if it does not exist.
         num_workers: Number of worker processes for parallel generation.
-        use_distribution_sampling: If True, samples stats from the per-class distribution.
+        distribution_sampler: Name of the encoder-decoder to use for distributional
+            sampling (one of ``'gmcm'``, ``'moments'``, ``'percentile'``). If ``None``,
+            per-graph statistics are replicated directly without sampling.
+
     Raises:
-        ValueError: If ``method`` is not a recognised generation method.
+        ValueError: If ``method`` or ``distribution_sampler`` is not recognised, or if
+            a sampler is requested for an observation-dependent method.
     """
     if method not in KNOWN_METHODS:
-        raise ValueError(
-            f"Unknown generation method '{method}'. "
-            f"Supported values: {sorted(KNOWN_METHODS)}."
-        )
-
-    if use_distribution_sampling and method in ["pdd", "ergm"]:
-        raise ValueError(f"Method '{method}' does not support distribution sampling as it requires 'observed_nx'.")
+        raise ValueError(f"Unknown generation method '{method}'. Supported values: {sorted(KNOWN_METHODS)}.")
+    if distribution_sampler is not None and distribution_sampler not in KNOWN_SAMPLERS:
+        raise ValueError(f"Unknown sampler '{distribution_sampler}'. Supported values: {sorted(KNOWN_SAMPLERS)}.")
+    if distribution_sampler is not None and method in {"pdd", "ergm"}:
+        raise ValueError(f"Method '{method}' requires 'observed_nx' and is incompatible with distribution sampling.")
 
     orig_pt_path = project_root / "data" / dataset_name / f"{dataset_name}_original.pt"
     if not orig_pt_path.exists():
         preprocess_and_save_original_dataset(dataset_name, project_root / "data")
-        
+
     dataset_obj = DatasetPT(orig_pt_path)
-    metadata = dataset_obj.metadata
-    
-    # original statistics are already saved inside the metadata
-    orig_per_graph_stats = metadata.get("per_graph_statistics", [])
-    # Whether to apply log-binned degree features (read from the original dataset metadata).
-    # If True, each variant will compute its own bin edges after all graphs are generated.
-    use_log_bin_deg: bool = metadata.get("use_log_bin_deg", False)
+    ds_metadata = dataset_obj.metadata
+
+    use_log_bin_deg: bool = ds_metadata.get("use_log_bin_deg", False)
     if use_log_bin_deg:
-        logger.info(f"Log-binned degree features enabled for {dataset_name}: bin edges will be computed per-variant after generation.")
+        logger.info(f"Log-binned degree features enabled for {dataset_name}: bin edges will be recomputed per-variant after generation.")
 
-    # variant_datasets[v] will hold one PyG Data object per original graph
-    variant_datasets: list[list[Data]] = [[] for _ in range(num_variants)]
-    variant_seeds:    list[list[int]]  = [[] for _ in range(num_variants)]
-    variant_infos:    list[list[dict]] = [[] for _ in range(num_variants)]
-
-    # Pre-generate all seeds to ensure reproducibility and pass them to workers
-    # We need a seed for each (graph, variant) pair
-    all_seeds = [
+    # Pre-generate one seed per (graph, variant) pair for full reproducibility.
+    all_seeds: list[list[int]] = [
         [int(rng.integers(0, 2**31)) for _ in range(num_variants)]
         for _ in range(len(dataset_obj))
     ]
 
-    # Pre-collect all necessary data for workers to avoid passing the whole dataset_obj
-    tasks = []
-    
-    if not use_distribution_sampling:
-        for i in range(len(dataset_obj)):
-            data = dataset_obj[i]
-            target_stats = get_target_stats(dataset_obj, i)
-            
-            obs_nx = None
-            if method == "pdd" or method == "ergm":
-                obs_nx = igraph_to_networkx(pytorch_to_igraph(data))
-                
-            tasks.append({
-                'i': i,
-                'target_stats': [target_stats] * num_variants,
-                'y': data.y,
-                'obs_nx': obs_nx,
-                'seeds': all_seeds[i],
-            })
+    if distribution_sampler is not None:
+        is_discrete = ds_metadata.get("is_discrete")
+        if is_discrete is None:
+            raise ValueError("Dataset metadata is missing 'is_discrete'. Re-run with --process_original.")
+        encoder = KNOWN_SAMPLERS[distribution_sampler](num_classes=ds_metadata["num_classes"], is_discrete=is_discrete, rng=rng)
+        tasks = _build_tasks_distributional(dataset_obj, ds_metadata, num_variants, all_seeds, encoder)
     else:
-        # Use distributional sampling
-        is_discrete = metadata.get("is_discrete")
-        per_class_stats = metadata.get("per_class_stats")
-        stat_structure = metadata.get("stat_structure")
-        
-        if is_discrete is None or per_class_stats is None or stat_structure is None:
-            raise ValueError(f"Dataset {dataset_name} is missing distributional metadata. Re-run with --process_original.")
-            
-        encoder = GMCMEncoderDecoder(num_classes=metadata["num_classes"], is_discrete=is_discrete, rng=rng)
-        
-        # Encode features for all classes
-        for class_id_str, class_info in per_class_stats.items():
-            class_id = int(class_id_str)
-            stat_matrix = class_info["stat_matrix"]
-            encoder.encode_features(stat_matrix, class_id)
-            
-        for i in range(len(dataset_obj)):
-            data = dataset_obj[i]
-            y_val = int(data.y.item())
-            
-            # Sample num_variants rows representing the stats for each variant
-            sampled_matrix = encoder.sample_features(num_samples=num_variants, class_id=y_val)
-            
-            target_stats_list = []
-            for v in range(num_variants):
-                flat_arr = sampled_matrix[v]
-                target_stats_list.append(unflatten_stats(flat_arr, stat_structure))
-            
-            tasks.append({
-                'i': i,
-                'target_stats': target_stats_list,
-                'y': data.y,
-                'obs_nx': None,
-                'seeds': all_seeds[i],
-            })
+        tasks = _build_tasks_direct(dataset_obj, method, num_variants, all_seeds)
+
+    # Accumulators indexed by variant index.
+    variant_datasets: list[list[Data]] = [[] for _ in range(num_variants)]
+    variant_seeds:    list[list[int]]  = [[] for _ in range(num_variants)]
+    variant_infos:    list[list[dict]] = [[] for _ in range(num_variants)]
+
+    worker_func = partial(_worker_generate_variants, method=method, num_variants=num_variants)
 
     if num_workers > 1:
-        logger.info(f"Generating synthetic variants in parallel using {num_workers} workers...")
-        worker_func = partial(
-            _worker_generate_variants,
-            method=method,
-            num_variants=num_variants
-        )
-        
-        # Use a reasonable chunksize for imap
+        logger.info(f"Generating synthetic variants in parallel using {num_workers} workers.")
         chunksize = max(1, len(tasks) // (num_workers * 2))
-
         with mp.Pool(processes=num_workers) as pool:
-            results = list(tqdm(
-                pool.imap_unordered(worker_func, tasks, chunksize=chunksize),
-                total=len(tasks),
-                desc=f"Phase A [{dataset_name}/{method}]"
-            ))
-            
-        # Reconstruct variant_datasets from results
-        # results is a list of (graph_idx, list_of_graphs, list_of_seeds)
-        results.sort(key=lambda x: x[0])
-        for i, graphs, seeds, worker_errors, infos in results:
-            for variant_idx, exc_msg in worker_errors:
-                logger.error(f"Generation failed for graph {i} variant {variant_idx} (method={method}): {exc_msg}")
-            for v in range(num_variants):
-                variant_datasets[v].append(graphs[v])
-                variant_seeds[v].append(seeds[v])
-                variant_infos[v].append(infos[v])
+            results = list(tqdm(pool.imap_unordered(worker_func, tasks, chunksize=chunksize), total=len(tasks), desc=f"Phase A [{dataset_name}/{method}]"))
+        results.sort(key=lambda r: r[0])
+        for result in results:
+            _accumulate_result(result, method, num_variants, variant_datasets, variant_seeds, variant_infos)
     else:
         with logging_redirect_tqdm():
-            pbar = tqdm(tasks, desc=f"Phase A [{dataset_name}/{method}]")
-            for task in pbar:
-                i, graphs, seeds, worker_errors, infos = _worker_generate_variants(
-                    task, method, num_variants
-                )
-                for variant_idx, exc_msg in worker_errors:
-                    logger.error(f"Generation failed for graph {i} variant {variant_idx} (method={method}): {exc_msg}")
-                for v in range(num_variants):
-                    variant_datasets[v].append(graphs[v])
-                    variant_seeds[v].append(seeds[v])
-                    variant_infos[v].append(infos[v])
+            for task in tqdm(tasks, desc=f"Phase A [{dataset_name}/{method}]"):
+                result = worker_func(task)
+                _accumulate_result(result, method, num_variants, variant_datasets, variant_seeds, variant_infos)
+
+    # Extract target statistics for each variant before saving
+    variant_target_stats: list[list[dict]] = [[] for _ in range(num_variants)]
+    for task in tasks:
+        for v in range(num_variants):
+            variant_target_stats[v].append(task["target_stats"][v])
 
     # Persist each variant to disk
     for v, (graphs, seeds, infos) in enumerate(zip(variant_datasets, variant_seeds, variant_infos)):
         filename = f"{dataset_name}_synth_v{v}.pt"
 
-        # Compute per-variant bin edges and re-encode features if requested.
-        # Bin edges are computed from THIS variant's degree distribution, not the original dataset's.
         if use_log_bin_deg:
             variant_bin_edges = compute_log_bin_edges(graphs)
             variant_in_dim = len(variant_bin_edges) - 1
             logger.info(f"Variant {v}: recomputed {variant_in_dim} bins from {len(graphs)} synthetic graphs.")
-            re_encoded: list[Data] = []
-            for data in graphs:
-                g = pytorch_to_igraph(data)
-                x = apply_log_bin_features(g, variant_bin_edges)
-                re_encoded.append(Data(x=x, edge_index=data.edge_index, y=data.y, num_nodes=data.num_nodes))
-            graphs = re_encoded
+            graphs = [Data(
+                    x=apply_log_bin_features(pytorch_to_igraph(data), variant_bin_edges),
+                    edge_index=data.edge_index,
+                    y=data.y,
+                    num_nodes=data.num_nodes,
+                ) for data in graphs]
         else:
             variant_bin_edges = []
             variant_in_dim = 1
 
-        # Map generator-specific info keys to standardized topology metric keys
-        precomputed_stats = []
-        for info in infos:
-            mapped = {}
-            if "best_annd" in info: mapped["annd"] = info["best_annd"]
-            if "best_eccentricity" in info: mapped["eccentricity"] = info["best_eccentricity"]
-            precomputed_stats.append(mapped)
+        # Map generator-specific keys to standardised topology metric keys.
+        precomputed_stats = [
+            {**({"annd": info["best_annd"]} if "best_annd" in info else {}),**({"eccentricity": info["best_eccentricity"]} if "best_eccentricity" in info else {}),}
+            for info in infos]
 
         synth_stats = per_graph_statistics(graphs, precomputed_stats=precomputed_stats, show_progress=False)
         synth_agg = aggregate_statistics(synth_stats)
-        
-        metadata = {
+
+        variant_metadata = {
             "source": method,
             "dataset_name": dataset_name,
             "variant_idx": v,
@@ -374,48 +391,50 @@ def generate_synthetic_variants(
             "use_log_bin_deg": use_log_bin_deg,
             "bin_edges": variant_bin_edges,
             "in_dim": variant_in_dim,
+            "distribution_sampler": distribution_sampler,
+            "per_graph_target_statistics": variant_target_stats[v],
             "per_graph_statistics": synth_stats,
             "aggregate_statistics": synth_agg,
         }
         
-        save_synthetic_dataset(graphs, output_dir, filename, extra_metadata=metadata)
+        save_synthetic_dataset(graphs, output_dir, filename, extra_metadata=variant_metadata)
         logger.info(f"Saved variant {v + 1}/{num_variants} for {dataset_name}/{method} → {output_dir / filename}")
 
+def _worker_generate_variants(task: dict, method: str, num_variants: int) -> tuple[int, list, list, list, list]:
+    """Generates all synthetic variants for a single graph (worker entry point).
 
-def _worker_generate_variants(task, method, num_variants):
-    """Worker function for parallel generation."""
-    # Ensure workers don't oversubscribe CPUs with internal threading
+    Args:
+        task: Dict with keys ``'i'``, ``'target_stats'``, ``'y'``, ``'obs_nx'``, ``'seeds'``.
+        method: Generation method name.
+        num_variants: Number of variants to generate
+    Returns:
+        Tuple ``(graph_idx, graphs, seeds, errors, infos)``.
+    """
     torch.set_num_threads(1)
-    
-    i = task['i']
-    target_stats_list = task['target_stats']
-    y = task['y']
-    obs_nx = task['obs_nx']
-    seeds_list = task['seeds']
-        
-    graphs = []
-    seeds = []
-    infos = []
-    errors = []
+
+    i: int = task["i"]
+    target_stats_list: list[dict] = task["target_stats"]
+    y = task["y"]
+    obs_nx = task["obs_nx"]
+    seeds_list: list[int] = task["seeds"]
+
+    graphs, seeds, infos, errors = [], [], [], []
+
     for v in range(num_variants):
         current_seed = seeds_list[v]
-        target_stats = target_stats_list[v]
-        
+        target_stats = dict(target_stats_list[v])
         if obs_nx is not None:
             target_stats["observed_nx"] = obs_nx
         try:
             synth_nx, info = generate_graph(target_stats, method, np.random.default_rng(current_seed))
             synth_ig = networkx_to_igraph(synth_nx)
-            synth_pyg = igraph_to_pytorch(synth_ig, y)
-            graphs.append(synth_pyg)
+            graphs.append(igraph_to_pytorch(synth_ig, y))
             seeds.append(current_seed)
             infos.append(info)
         except Exception as exc:
             errors.append((v, str(exc)))
-            # Fallback: minimal 1-node graph with dummy features.
-            dummy_pyg = Data(x=torch.ones((1, 1)), edge_index=torch.empty((2, 0), dtype=torch.long), y=y, num_nodes=1)
-            graphs.append(dummy_pyg)
+            graphs.append(Data(x=torch.ones((1, 1)),edge_index=torch.empty((2, 0), dtype=torch.long),y=y,num_nodes=1))
             seeds.append(-1)
             infos.append({})
-            
+
     return i, graphs, seeds, errors, infos
