@@ -103,7 +103,8 @@ def encode_and_sample_dataset(df_dataset: pd.DataFrame, dataset_name: str) -> Tu
         # Save encodings for this class
         emb_row = {"class_id": class_id}
         encoding = ENC_DEC._encodings[class_id]
-        for i, feat in enumerate(FEATURES):
+        modeled_features = [feat for idx, feat in enumerate(FEATURES) if idx != 1]
+        for i, feat in enumerate(modeled_features):
             emb_row[feat] = encoding[:, i]
         embeddings_rows.append(emb_row)
 

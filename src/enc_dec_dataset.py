@@ -33,9 +33,10 @@ class FeatureEncoderDecoder(ABC):
         self.rng = rng if rng is not None else np.random.default_rng()
         self._encodings: list[np.ndarray | None] = [None] * num_classes
         self._corr_matrices: list[np.ndarray | None] = [None] * num_classes
-        self._is_discrete: np.ndarray = is_discrete
+        # MODIFICA PROVVISORIA: modella deg_moments[0] (colonna 2) e non edges (colonna 1)
+        # self._is_discrete: np.ndarray = np.delete(is_discrete, 2)
+        self._is_discrete: np.ndarray = np.delete(is_discrete, 1)
 
-    @abstractmethod
     def encode_features(self, stat_matrix: np.ndarray, class_id: int) -> None:
         """Encodes multiple features into compact representations and stores them for a class.
 
@@ -43,8 +44,10 @@ class FeatureEncoderDecoder(ABC):
             stat_matrix: Matrix of shape (num_samples, num_features).
             class_id: The ID of the class being encoded.
         """
+        # MODIFICA PROVVISORIA: modella deg_moments[0] (colonna 2) e non edges (colonna 1)
+        # self._encode_features(np.delete(stat_matrix, 2, axis=1), class_id)
+        self._encode_features(np.delete(stat_matrix, 1, axis=1), class_id)
 
-    @abstractmethod
     def sample_features(self, num_samples: int, class_id: int) -> np.ndarray:
         """Samples synthetic feature values from the stored representations of a class.
 
@@ -54,6 +57,29 @@ class FeatureEncoderDecoder(ABC):
         Returns:
             Matrix of shape (num_samples, num_features).
         """
+        samples = self._sample_features(num_samples, class_id)
+        
+        # MODIFICA PROVVISORIA: modella deg_moments[0] (colonna 2) e non edges (colonna 1)
+        # # Derive mean degree (col 2) from nodes (col 0) and edges (col 1)
+        # denom = samples[:, 0] * np.maximum(samples[:, 0] - 1, 1)
+        # mean_degree = np.divide(2.0 * samples[:, 1], denom, out=np.zeros(num_samples), where=denom > 0)
+        # return np.insert(samples, 2, mean_degree, axis=1)
+
+        # Derive edges (col 1) from nodes (col 0) and mean degree (col 1 in the sampled matrix)
+        n_nodes = samples[:, 0]
+        mean_degree_norm = samples[:, 1]
+        n_edges = np.round((mean_degree_norm * n_nodes * np.maximum(n_nodes - 1, 1)) / 2.0)
+        n_edges = np.maximum(n_edges, 0)
+        
+        return np.insert(samples, 1, n_edges, axis=1)
+
+    @abstractmethod
+    def _encode_features(self, stat_matrix: np.ndarray, class_id: int) -> None:
+        pass
+
+    @abstractmethod
+    def _sample_features(self, num_samples: int, class_id: int) -> np.ndarray:
+        pass
 
     @abstractmethod
     def get_embedding(self, class_id: int) -> np.ndarray:
@@ -97,7 +123,7 @@ class MomentsEncoderDecoder(FeatureEncoderDecoder):
         if not 1 <= k <= 4: raise ValueError(f"k must be between 1 and 4, got {k}.")
         self.k = k
 
-    def encode_features(self, stat_matrix: np.ndarray, class_id: int) -> None:
+    def _encode_features(self, stat_matrix: np.ndarray, class_id: int) -> None:
         """Computes the first k moments for each feature and stores them for a class.
 
         Args:
@@ -116,7 +142,7 @@ class MomentsEncoderDecoder(FeatureEncoderDecoder):
 
         self._encodings[class_id] = np.array(moments)
 
-    def sample_features(self, num_samples: int, class_id: int) -> np.ndarray:
+    def _sample_features(self, num_samples: int, class_id: int) -> np.ndarray:
         """Generates samples for all features matching the stored moments of a class.
 
         Args:
@@ -253,7 +279,7 @@ class PercentileEncoderDecoder(FeatureEncoderDecoder):
         self.percentile_size = percentile_size
         self.replicate_correlation = replicate_correlation
 
-    def encode_features(self, stat_matrix: np.ndarray, class_id: int) -> None:
+    def _encode_features(self, stat_matrix: np.ndarray, class_id: int) -> None:
         """Computes the percentile edges for each feature and stores them for a class.
 
         Args:
@@ -283,7 +309,7 @@ class PercentileEncoderDecoder(FeatureEncoderDecoder):
             corr_matrix = np.nan_to_num(corr_matrix, nan=0.0)
             self._corr_matrices[class_id] = corr_matrix + np.eye(corr_matrix.shape[0]) * 1e-6
 
-    def sample_features(self, num_samples: int, class_id: int) -> np.ndarray:
+    def _sample_features(self, num_samples: int, class_id: int) -> np.ndarray:
         """Generates samples for all features matching stored percentiles of a class.
 
         Args:
@@ -378,7 +404,7 @@ class GMCMEncoderDecoder(FeatureEncoderDecoder):
         self.n_components = n_components
         self._gmm_models: list[GaussianMixture | None] = [None] * num_classes
 
-    def encode_features(self, stat_matrix: np.ndarray, class_id: int) -> None:
+    def _encode_features(self, stat_matrix: np.ndarray, class_id: int) -> None:
         """Computes percentiles for marginals and fits a GMM on the latent normal space.
 
         Args:
@@ -399,7 +425,7 @@ class GMCMEncoderDecoder(FeatureEncoderDecoder):
             discrete_mask = self._is_discrete.astype(bool)
             jitter = self.rng.uniform(-0.5, 0.5, size=(working_matrix.shape[0], np.sum(discrete_mask)))
             working_matrix[:, discrete_mask] += jitter
-            
+
         # Vectorized quantile computation across all features (axis=0)
         # Shape: (num_percentiles, num_features)
         percentiles = np.quantile(working_matrix, q, axis=0)
@@ -420,12 +446,13 @@ class GMCMEncoderDecoder(FeatureEncoderDecoder):
         z = scipy.stats.norm.ppf(u)
         
         # --- PHASE COPULA: Fit GMM ---
-        random_state = int(self.rng.integers(0, 10000)) if self.rng else 42
-        gmm = GaussianMixture(n_components=self.n_components, covariance_type='full', random_state=random_state)
+        seed = int(self.rng.integers(0, 10000)) if self.rng else 42
+        gmm_rng = np.random.RandomState(seed)
+        gmm = GaussianMixture(n_components=self.n_components, covariance_type='full', random_state=gmm_rng)
         gmm.fit(z)
         self._gmm_models[class_id] = gmm
 
-    def sample_features(self, num_samples: int, class_id: int) -> np.ndarray:
+    def _sample_features(self, num_samples: int, class_id: int) -> np.ndarray:
         """Generates samples by sampling from GMM and applying inverse PIT.
 
         Args:
@@ -447,6 +474,11 @@ class GMCMEncoderDecoder(FeatureEncoderDecoder):
         # --- PHASE COPULA: Sample from GMM and transform to uniform ---
         gmm = self._gmm_models[class_id]
         z_sample, _ = gmm.sample(num_samples)
+        
+        # Scikit-learn's GMM returns samples sorted by component! We must shuffle them
+        # so that when sampling a batch of variants, the variants don't get stuck on a single component.
+        self.rng.shuffle(z_sample)
+        
         u = scipy.stats.norm.cdf(z_sample)
         
         # --- PHASE MARGINALS: Inverse PIT ---

@@ -200,19 +200,19 @@ def _build_tasks_direct(dataset_obj: "DatasetPT", method: str, num_variants: int
     return tasks
 
 
-def _build_tasks_distributional(dataset_obj: "DatasetPT", metadata: dict, num_variants: int, all_seeds: list[list[int]], encoder: "FeatureEncoderDecoder") -> list[dict]:
-    """Builds per-graph tasks sampling statistics from the per-class distribution.
-
+def _build_tasks_distributional(dataset_obj: DatasetPT, metadata: dict[str, Any], num_variants: int, all_seeds: list[list[int]], encoder: FeatureEncoderDecoder) -> list[dict[str, Any]]:
+    """Builds tasks by sampling class-wise statistics for all variants at once.
+    
     Args:
-        dataset_obj: The loaded original dataset.
-        metadata: Dataset metadata containing distributional fields.
-        num_variants: Number of synthetic variants.
-        all_seeds: Pre-generated seeds, shape (n_graphs, num_variants).
-        encoder: A pre-fitted :class:`FeatureEncoderDecoder` instance.
+        dataset_obj: The loaded baseline dataset.
+        metadata: Dataset metadata containing 'per_class_stats' and 'stat_structure'.
+        num_variants: The number of synthetic variants to generate.
+        all_seeds: Pre-generated random seeds, shape (n_graphs, num_variants).
+        encoder: An initialized and pre-fitted FeatureEncoderDecoder.
     Returns:
-        List of task dicts, one per graph.
+        A list of task dictionaries containing target stats per variant.
     Raises:
-        ValueError: If required distributional metadata fields are missing.
+        ValueError: If 'per_class_stats' or 'stat_structure' are missing from the metadata.
     """
     per_class_stats = metadata.get("per_class_stats")
     stat_structure = metadata.get("stat_structure")
@@ -220,26 +220,38 @@ def _build_tasks_distributional(dataset_obj: "DatasetPT", metadata: dict, num_va
     if per_class_stats is None or stat_structure is None:
         raise ValueError("Dataset metadata is missing distributional fields ('per_class_stats', 'stat_structure'). Re-run with --process_original.")
 
+    # Encode features once for all classes
     for class_id_str, class_info in per_class_stats.items():
         encoder.encode_features(class_info["stat_matrix"], int(class_id_str))
 
-    tasks = []
+    # Group baseline graph indices by class to perform batch-sampling
+    from collections import defaultdict
+    indices_by_class = defaultdict(list)
     for i in range(len(dataset_obj)):
-        data = dataset_obj[i]
-        y_val = int(data.y.item())
-        sampled_matrix = encoder.sample_features(num_samples=num_variants, class_id=y_val)
-        target_stats_list = [unflatten_stats(sampled_matrix[v], stat_structure) for v in range(num_variants)]
-        tasks.append({
-            "i": i,
-            "target_stats": target_stats_list,
-            "y": data.y,
-            "obs_nx": None,
-            "seeds": all_seeds[i],
-        })
+        class_id = int(dataset_obj[i].y.item())
+        indices_by_class[class_id].append(i)
+
+    # Pre-allocate task structures
+    tasks = [{
+        "i": i,
+        "target_stats": [None] * num_variants,
+        "y": dataset_obj[i].y,
+        "obs_nx": None,
+        "seeds": all_seeds[i],
+    } for i in range(len(dataset_obj))]
+
+    # Generate complete dataset statistics per variant to maintain full variance
+    for v in range(num_variants):
+        for class_id, indices in indices_by_class.items():
+            num_samples = len(indices)
+            sampled_matrix = encoder.sample_features(num_samples=num_samples, class_id=class_id)
+            for j, idx in enumerate(indices):
+                tasks[idx]["target_stats"][v] = unflatten_stats(sampled_matrix[j], stat_structure)
+
     return tasks
 
 
-def _accumulate_result(result: tuple, method: str, num_variants: int, variant_datasets: list[list], variant_seeds: list[list], variant_infos: list[list]) -> None:
+def _accumulate_result(result: tuple, method: str, num_variants: int, variant_datasets: list[list], variant_seeds: list[list], variant_infos: list[list], y: torch.Tensor) -> None:
     """Merges a single worker result into the per-variant accumulators.
     Args:
         result: Tuple (graph_idx, graphs, seeds, errors, infos) from a worker.
@@ -248,12 +260,18 @@ def _accumulate_result(result: tuple, method: str, num_variants: int, variant_da
         variant_datasets: Accumulator list indexed by variant.
         variant_seeds: Accumulator list indexed by variant.
         variant_infos: Accumulator list indexed by variant.
+        y: Target label for the graph.
     """
     i, graphs, seeds, errors, infos = result
     for variant_idx, exc_msg in errors:
         logger.error(f"Generation failed for graph {i} variant {variant_idx} (method={method}): {exc_msg}")
     for v in range(num_variants):
-        variant_datasets[v].append(graphs[v])
+        ig_g = graphs[v]
+        if ig_g is None:
+            pyg_data = Data(x=torch.ones((1, 1)), edge_index=torch.empty((2, 0), dtype=torch.long), y=y, num_nodes=1)
+        else:
+            pyg_data = igraph_to_pytorch(ig_g, y)
+        variant_datasets[v].append(pyg_data)
         variant_seeds[v].append(seeds[v])
         variant_infos[v].append(infos[v])
 
@@ -343,12 +361,13 @@ def generate_synthetic_variants(
             results = list(tqdm(pool.imap_unordered(worker_func, tasks, chunksize=chunksize), total=len(tasks), desc=f"Phase A [{dataset_name}/{method}]"))
         results.sort(key=lambda r: r[0])
         for result in results:
-            _accumulate_result(result, method, num_variants, variant_datasets, variant_seeds, variant_infos)
+            task_i = tasks[result[0]]
+            _accumulate_result(result, method, num_variants, variant_datasets, variant_seeds, variant_infos, task_i["y"])
     else:
         with logging_redirect_tqdm():
             for task in tqdm(tasks, desc=f"Phase A [{dataset_name}/{method}]"):
                 result = worker_func(task)
-                _accumulate_result(result, method, num_variants, variant_datasets, variant_seeds, variant_infos)
+                _accumulate_result(result, method, num_variants, variant_datasets, variant_seeds, variant_infos, task["y"])
 
     # Extract target statistics for each variant before saving
     variant_target_stats: list[list[dict]] = [[] for _ in range(num_variants)]
@@ -428,12 +447,12 @@ def _worker_generate_variants(task: dict, method: str, num_variants: int) -> tup
         try:
             synth_nx, info = generate_graph(target_stats, method, np.random.default_rng(current_seed))
             synth_ig = networkx_to_igraph(synth_nx)
-            graphs.append(igraph_to_pytorch(synth_ig, y))
+            graphs.append(synth_ig)
             seeds.append(current_seed)
             infos.append(info)
         except Exception as exc:
             errors.append((v, str(exc)))
-            graphs.append(Data(x=torch.ones((1, 1)),edge_index=torch.empty((2, 0), dtype=torch.long),y=y,num_nodes=1))
+            graphs.append(None)
             seeds.append(-1)
             infos.append({})
 

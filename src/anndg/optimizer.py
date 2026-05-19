@@ -211,6 +211,18 @@ def optimizer(
     current_annd = graph_state.get_annd()
     current_ecc = graph_state.get_eccentricity() if target_eccentricity is not None else None
 
+    # Early exit if the graph does not have enough edges for double-edge swap
+    if graph_state.num_edges < 2:
+        if debug:
+            print("Graph has fewer than 2 edges; skipping optimization.")
+        annd_errors = _compute_annd_errors(current_annd, target_annd)
+        ecc_errors = _compute_eccentricity_errors(current_ecc, target_eccentricity) if current_ecc is not None else None
+        current_error = _combined_error(annd_errors, ecc_errors)
+        info = {"best_error": current_error, "best_annd": current_annd}
+        if target_eccentricity is not None:
+            info["best_eccentricity"] = current_ecc
+        return igraph_to_networkx(initial_graph), info
+
     if debug:
         print(f"{'Initial ANND:':<40} {current_annd}")
         print(f"{'Target ANND:':<40} {target_annd}")
