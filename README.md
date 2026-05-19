@@ -4,9 +4,9 @@
 - [Synthetic Benchmark for Graph Neural Networks](#synthetic-benchmark-for-graph-neural-networks)
   - [Table of Contents](#table-of-contents)
   - [Installation](#installation)
-  - [Project structure](#project-structure)
+  - [Project Structure](#project-structure)
   - [Usage](#usage)
-    - [Standard Command for full Benchmark run](#standard-command-for-full-benchmark-run)
+    - [Standard Command for a Full Benchmark Run](#standard-command-for-a-full-benchmark-run)
     - [Command Line Arguments](#command-line-arguments)
       - [Dataset \& Generation Settings](#dataset--generation-settings)
       - [GNN Training \& Evaluation Settings](#gnn-training--evaluation-settings)
@@ -21,8 +21,8 @@ Some dependencies like `torch` need to be installed manually beforehand as noted
 
 ```bash
 # Create and activate the virtual environment
-python -m venv venv_ergm
-source venv_ergm/bin/activate  # On Windows: venv_ergm\Scripts\activate
+python -m venv venv_sbg
+source venv/bin/activate  # On Windows: venv\Scripts\activate
 
 # Install manually 
 pip install torch
@@ -33,7 +33,7 @@ pip install torch-scatter torch-sparse
 pip install -r requirements.txt
 ```
 
-## Project structure
+## Project Structure
 
 The repository code is organized into three main spaces:
 - **`notebooks/`**: Post-hoc analysis, statistical evaluations, and interactive visualizations.
@@ -75,10 +75,10 @@ syn_bench_gnn/
 ## Usage
 
 `main_experiment.py` orchestrates the complete benchmark pipeline, which is divided into two phases:
-- **Phase A (Generation)**: Download datasets (if not present) and generates multiple synthetic datasets (variants) for the selected TUDatasets using various graph generator algorithms.
+- **Phase A (Generation)**: Downloads datasets (if not present) and generates multiple synthetic datasets (variants) for the selected TUDatasets using various graph generator algorithms.
 - **Phase B (GNN Evaluation)**: Trains and evaluates GNN models on the original and synthetic datasets to assess structural similarity.
 
-### Standard Command for full Benchmark run
+### Standard Command for a Full Benchmark Run
 ```bash
 nohup python main_experiment.py --cut_datasets 500 --features_BinLogDeg --process_original > output.log 2>&1 &
 ```
@@ -103,7 +103,7 @@ nohup python main_experiment.py --cut_datasets 500 --features_BinLogDeg --proces
   *Choices:* `padma`, `pdd`, `ergm`, `dummyEdges`, `dummyNodes`, `anndg`, `anndgE`, `nextGen`  
   *Default:* `["dummyNodes", "dummyEdges", "padma", "anndg", "anndgE"]`
 - `--num_synth_datasets V`, `-V V`  
-  Number of independent synthetic variants $V$ to generate per (dataset, method) pair.  
+  Number of independent synthetic variants *V* to generate per (dataset, method) pair.  
   *Default:* `20` (Note: the old default was `3`).
 
 #### GNN Training & Evaluation Settings
@@ -132,7 +132,7 @@ nohup python main_experiment.py --cut_datasets 500 --features_BinLogDeg --proces
 
 ## Results Analysis and Visualization
 
-All the notebooks have a copy in *.py but they are not meant to be executed, they are used only to work with the agent and they should be sincronized with the *.ipynb files.
+All notebooks have a synchronized `.py` copy in the same directory. These Python files are used to facilitate version control and integration with AI agents, and should be kept in sync with the corresponding `.ipynb` notebooks.
 
 The most important notebooks are:
 - `notebooks/generation_results_analysis.ipynb`: Analyzes the quality of the generated graphs and of the encoding-decoding scheme.
