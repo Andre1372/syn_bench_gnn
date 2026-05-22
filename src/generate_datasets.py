@@ -59,6 +59,13 @@ def generate_graph(target_stats: dict[str, Any], method: str, rng: np.random.Gen
     if rng is None:
         rng = np.random.default_rng()
 
+    # Early exit for graphs with 1 or 0 nodes (where no simple edges are possible)
+    n_nodes = target_stats.get("n_nodes", 0)
+    if n_nodes <= 1:
+        G_nx = nx.Graph()
+        G_nx.add_nodes_from(range(n_nodes))
+        return G_nx, {}
+
     if method == "nextGen":
         return anndg_generate_graph(target_stats, rng=rng, replicate_eccentricity=True)
     elif method == "padma":

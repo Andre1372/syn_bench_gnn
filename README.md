@@ -22,7 +22,7 @@ Some dependencies like `torch` need to be installed manually beforehand as noted
 ```bash
 # Create and activate the virtual environment
 python -m venv venv_sbg
-source venv/bin/activate  # On Windows: venv\Scripts\activate
+source venv_sbg/bin/activate  # On Windows: venv_sbg\Scripts\activate
 
 # Install manually 
 pip install torch
@@ -104,7 +104,7 @@ nohup python main_experiment.py --cut_datasets 500 --features_BinLogDeg --proces
   *Default:* `["dummyNodes", "dummyEdges", "padma", "anndg", "anndgE"]`
 - `--num_synth_datasets V`, `-V V`  
   Number of independent synthetic variants *V* to generate per (dataset, method) pair.  
-  *Default:* `20` (Note: the old default was `3`).
+  *Default:* `20`.
 
 #### GNN Training & Evaluation Settings
 - `--process_original`  

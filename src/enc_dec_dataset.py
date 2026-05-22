@@ -33,8 +33,7 @@ class FeatureEncoderDecoder(ABC):
         self.rng = rng if rng is not None else np.random.default_rng()
         self._encodings: list[np.ndarray | None] = [None] * num_classes
         self._corr_matrices: list[np.ndarray | None] = [None] * num_classes
-        # MODIFICA PROVVISORIA: modella deg_moments[0] (colonna 2) e non edges (colonna 1)
-        # self._is_discrete: np.ndarray = np.delete(is_discrete, 2)
+        # We drop col 1 (edges) because redundant with avg degree + num_nodes
         self._is_discrete: np.ndarray = np.delete(is_discrete, 1)
 
     def encode_features(self, stat_matrix: np.ndarray, class_id: int) -> None:
@@ -44,9 +43,16 @@ class FeatureEncoderDecoder(ABC):
             stat_matrix: Matrix of shape (num_samples, num_features).
             class_id: The ID of the class being encoded.
         """
-        # MODIFICA PROVVISORIA: modella deg_moments[0] (colonna 2) e non edges (colonna 1)
-        # self._encode_features(np.delete(stat_matrix, 2, axis=1), class_id)
-        self._encode_features(np.delete(stat_matrix, 1, axis=1), class_id)
+        working_matrix = stat_matrix.astype(float).copy()
+        
+        # Un-normalize mean degree (col 2) and variance (col 3)
+        n_nodes = working_matrix[:, 0]
+        denom = np.maximum(n_nodes - 1, 1)
+        working_matrix[:, 2] = working_matrix[:, 2] * denom
+        working_matrix[:, 3] = working_matrix[:, 3] * (denom ** 2)
+        
+        # Delete Edges (col 1)
+        self._encode_features(np.delete(working_matrix, 1, axis=1), class_id)
 
     def sample_features(self, num_samples: int, class_id: int) -> np.ndarray:
         """Samples synthetic feature values from the stored representations of a class.
@@ -59,19 +65,26 @@ class FeatureEncoderDecoder(ABC):
         """
         samples = self._sample_features(num_samples, class_id)
         
-        # MODIFICA PROVVISORIA: modella deg_moments[0] (colonna 2) e non edges (colonna 1)
-        # # Derive mean degree (col 2) from nodes (col 0) and edges (col 1)
-        # denom = samples[:, 0] * np.maximum(samples[:, 0] - 1, 1)
-        # mean_degree = np.divide(2.0 * samples[:, 1], denom, out=np.zeros(num_samples), where=denom > 0)
-        # return np.insert(samples, 2, mean_degree, axis=1)
-
-        # Derive edges (col 1) from nodes (col 0) and mean degree (col 1 in the sampled matrix)
         n_nodes = samples[:, 0]
-        mean_degree_norm = samples[:, 1]
-        n_edges = np.round((mean_degree_norm * n_nodes * np.maximum(n_nodes - 1, 1)) / 2.0)
-        n_edges = np.maximum(n_edges, 0)
+        avg_degree = np.maximum(samples[:, 1], 0)
+        var_unnorm = np.maximum(samples[:, 2], 0)
         
-        return np.insert(samples, 1, n_edges, axis=1)
+        # Derive Edges (to become col 1)
+        n_edges = np.round((n_nodes * avg_degree) / 2.0)
+        
+        # Re-normalize mean degree and variance
+        denom = np.maximum(n_nodes - 1, 1)
+        mean_degree_norm = avg_degree / denom
+        var_norm = var_unnorm / (denom ** 2)
+        
+        # Insert n_edges at col 1. This shifts avg_degree to col 2, and var_unnorm to col 3.
+        samples = np.insert(samples, 1, n_edges, axis=1)
+        
+        # Overwrite cols 2 and 3 with re-normalized values
+        samples[:, 2] = mean_degree_norm
+        samples[:, 3] = var_norm
+        
+        return samples
 
     @abstractmethod
     def _encode_features(self, stat_matrix: np.ndarray, class_id: int) -> None:
@@ -167,6 +180,8 @@ class MomentsEncoderDecoder(FeatureEncoderDecoder):
         if np.any(self._is_discrete):
             discrete_mask = self._is_discrete.astype(bool)
             samples[:, discrete_mask] = np.round(np.maximum(0, samples[:, discrete_mask]))
+            if discrete_mask[0]:
+                samples[:, 0] = np.maximum(1.0, samples[:, 0])
 
         return samples
 
