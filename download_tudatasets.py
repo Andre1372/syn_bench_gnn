@@ -53,7 +53,7 @@ def fetch_dataset_stats(dataset_name: str, data_dir: Path) -> dict[str, Any] | N
             "avg_edges": avg_edges,
             "std_edges": std_edges,
             "node_features": num_features,
-            "compatible": (num_graphs >= 50 and num_graphs <= 4500 and avg_nodes <= 300)
+            "compatible": (num_graphs >= 50 and num_graphs <= 5000 and avg_nodes <= 300)
         }
     except Exception as e:
         logger.error(f"Failed to process dataset '{dataset_name}': {e}")
@@ -71,7 +71,7 @@ def cleanup_incompatible_dataset(dataset_name: str, data_dir: Path) -> None:
             logger.error(f"Error while deleting {dataset_name}: {e}")
 
 
-def display_results(stats_list: list[dict[str, Any]], discarded_structural: list[str], discarded_f1: list[str]) -> None:
+def display_results(stats_list: list[dict[str, Any]], discarded_structural: list[str], discarded_f1: list[str], ran_benchmark: bool = True) -> None:
     """Formats and prints the compatible and discarded dataset statistics to the console."""
     if discarded_structural:
         print("\n" + "="*80)
@@ -80,7 +80,7 @@ def display_results(stats_list: list[dict[str, Any]], discarded_structural: list
         print(", ".join(discarded_structural))
         print("="*80)
 
-    if discarded_f1:
+    if ran_benchmark and discarded_f1:
         print("\n" + "="*80)
         print(f"Discarded by GNN benchmark (neither config reached F1 >= {MIN_F1_THRESHOLD}) ({len(discarded_f1)})")
         print("="*80)
@@ -93,37 +93,65 @@ def display_results(stats_list: list[dict[str, Any]], discarded_structural: list
 
     df = pd.DataFrame(stats_list)
 
-    def _fmt(val: float) -> str:
-        return f"{val:.3f}"
+    if ran_benchmark:
+        def _fmt(val: float) -> str:
+            return f"{val:.3f}"
 
-    def _pass(val: float) -> str:
-        mark = "\u2713" if val >= MIN_F1_THRESHOLD else "\u2717"
-        return f"{val:.3f} {mark}"
+        def _pass(val: float) -> str:
+            mark = "\u2713" if val >= MIN_F1_THRESHOLD else "\u2717"
+            return f"{val:.3f} {mark}"
 
-    # Format output columns for readability
-    display_df = pd.DataFrame({
-        "dataset": df["dataset"],
-        "graphs": df["graphs"],
-        "classes": df["classes"],
-        "avg nodes +- std": df.apply(lambda r: f"{r['avg_nodes']:.1f} +- {r['std_nodes']:.1f}", axis=1),
-        "avg edges +- std": df.apply(lambda r: f"{r['avg_edges']:.1f} +- {r['std_edges']:.1f}", axis=1),
-        "node feat": df["node_features"],
-        "GCN dummy F1": df["gcn_dummy_mean_f1"].map(_pass),
-        "GIN dummy F1": df["gin_dummy_mean_f1"].map(_pass),
-        "GCN logbin F1": df["gcn_log_bin_mean_f1"].map(_pass),
-        "GIN logbin F1": df["gin_log_bin_mean_f1"].map(_pass),
-        "kept config": df["kept_config"],
-    })
+        # Format output columns for readability
+        display_df = pd.DataFrame({
+            "dataset": df["dataset"],
+            "graphs": df["graphs"],
+            "classes": df["classes"],
+            "avg nodes +- std": df.apply(lambda r: f"{r['avg_nodes']:.1f} +- {r['std_nodes']:.1f}", axis=1),
+            "avg edges +- std": df.apply(lambda r: f"{r['avg_edges']:.1f} +- {r['std_edges']:.1f}", axis=1),
+            "node feat": df["node_features"],
+            "GCN dummy F1": df["gcn_dummy_mean_f1"].map(_pass),
+            "GIN dummy F1": df["gin_dummy_mean_f1"].map(_pass),
+            "GCN logbin F1": df["gcn_log_bin_mean_f1"].map(_pass),
+            "GIN logbin F1": df["gin_log_bin_mean_f1"].map(_pass),
+            "kept config": df["kept_config"],
+        })
 
-    print("\n" + "="*130)
-    print(f"Final Compatible Datasets (structural + at least one config with GCN & GIN F1 >= {MIN_F1_THRESHOLD})")
-    print("="*130)
+        print("\n" + "="*130)
+        print(f"Final Compatible Datasets (structural + at least one config with GCN & GIN F1 >= {MIN_F1_THRESHOLD})")
+        print("="*130)
+    else:
+        # Format simpler output columns if benchmark was skipped
+        display_df = pd.DataFrame({
+            "dataset": df["dataset"],
+            "graphs": df["graphs"],
+            "classes": df["classes"],
+            "avg nodes +- std": df.apply(lambda r: f"{r['avg_nodes']:.1f} +- {r['std_nodes']:.1f}", axis=1),
+            "avg edges +- std": df.apply(lambda r: f"{r['avg_edges']:.1f} +- {r['std_edges']:.1f}", axis=1),
+            "node feat": df["node_features"],
+        })
+
+        print("\n" + "="*100)
+        print("Final Compatible Datasets (structural criteria only)")
+        print("="*100)
+
     print(display_df.to_string(index=False))
     print("="*130 + "\n")
 
 
 def main() -> None:
     """Main execution flow for downloading and filtering TUDatasets."""
+    import argparse
+    parser = argparse.ArgumentParser(
+        description="Download TUDatasets and filter them based on specific structural criteria.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    parser.add_argument(
+        "--run_benchmark",
+        action="store_true",
+        help="Run GNN benchmark for filtering (otherwise, only use structural criteria).",
+    )
+    args = parser.parse_args()
+
     dataset_names = [
         "AIDS", "BZR", "COX2", "DHFR", "FRANKENSTEIN", "Mutagenicity", "MUTAG", "NCI1", "NCI109",
         "PTC_FM", "PTC_FR", "PTC_MM", "PTC_MR", "DD", "KKI", "OHSU", "Peking_1", "PROTEINS", 
@@ -161,6 +189,11 @@ def main() -> None:
         f"Phase 1 done: {len(structurally_compatible)} datasets passed structural criteria, "
         f"{len(discarded_structural)} discarded."
     )
+
+    if not args.run_benchmark:
+        logger.info("GNN benchmark skipped as requested. Keeping all structurally compatible datasets.")
+        display_results(structurally_compatible, discarded_structural, [], ran_benchmark=False)
+        return
 
     # --- Phase 2: GNN benchmark filtering ---
     final_results: list[dict[str, Any]] = []
@@ -210,7 +243,7 @@ def main() -> None:
             )
             cleanup_incompatible_dataset(name, data_dir)
 
-    display_results(final_results, discarded_structural, discarded_f1)
+    display_results(final_results, discarded_structural, discarded_f1, ran_benchmark=True)
 
 
 if __name__ == "__main__":

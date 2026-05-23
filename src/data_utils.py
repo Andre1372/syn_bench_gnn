@@ -395,33 +395,9 @@ def preprocess_and_save_original_dataset(
     raw_dataset = TUDataset(root=str(data_dir), name=dataset_name)
     num_classes = raw_dataset.num_classes
 
-    if use_log_bin_deg:
-        # First pass: build a stripped dataset to compute degree distributions
-        # (we only need topology here, so temporarily use remove_features)
-        temp_list = [remove_features(d) for d in raw_dataset]
-        if max_size is not None and len(temp_list) > max_size:
-            temp_list = sample_dataset(temp_list, max_size, rng)
-        # Compute global bin edges from the (possibly sampled) dataset
-        bin_edges = compute_log_bin_edges(temp_list)
-        in_dim = len(bin_edges) - 1
-        logger.info(f"Log-binned degree features: {in_dim} bins, edges={bin_edges}")
-        # Apply log-bin features to every graph
-        original_data_list = []
-        for data in temp_list:
-            g = pytorch_to_igraph(data)
-            x = apply_log_bin_features(g, bin_edges)
-            edge_index = data.edge_index.clone()
-            y = data.y.clone() if data.y is not None else None
-            original_data_list.append(Data(x=x, edge_index=edge_index, y=y, num_nodes=data.num_nodes))
-    else:
-        # Default: dummy (all-ones) features
-        bin_edges = []
-        original_data_list = [remove_features(d) for d in raw_dataset]
-        in_dim = 1
-        if max_size is not None and len(original_data_list) > max_size:
-            original_data_list = sample_dataset(original_data_list, max_size, rng)
+    original_data_list = [remove_features(d) for d in raw_dataset]
 
-    # Binarize labels if multi-class using optimal partitioning for balance
+    # 1. Binarize labels if multi-class using optimal partitioning for balance
     if num_classes > 2:
         all_y = torch.cat([d.y for d in original_data_list if d.y is not None]).view(-1)
         unique_labels, counts = torch.unique(all_y, return_counts=True)
@@ -453,6 +429,30 @@ def preprocess_and_save_original_dataset(
             if d.y is not None:
                 d.y = torch.tensor([1 if d.y.item() in class1_labels else 0], dtype=torch.long)
         num_classes = 2
+
+    # 2. Sample (down-sample) dataset if needed
+    if max_size is not None and len(original_data_list) > max_size:
+        original_data_list = sample_dataset(original_data_list, max_size, rng)
+
+    # 3. Compute and apply features
+    if use_log_bin_deg:
+        # Compute global bin edges from the (binarized and sampled) dataset
+        bin_edges = compute_log_bin_edges(original_data_list)
+        in_dim = len(bin_edges) - 1
+        logger.info(f"Log-binned degree features: {in_dim} bins, edges={bin_edges}")
+        # Apply log-bin features to every graph
+        final_list = []
+        for data in original_data_list:
+            g = pytorch_to_igraph(data)
+            x = apply_log_bin_features(g, bin_edges)
+            edge_index = data.edge_index.clone()
+            y = data.y.clone() if data.y is not None else None
+            final_list.append(Data(x=x, edge_index=edge_index, y=y, num_nodes=data.num_nodes))
+        original_data_list = final_list
+    else:
+        # Default: dummy (all-ones) features
+        bin_edges = []
+        in_dim = 1
 
     from src.graph_analysis import per_graph_statistics, aggregate_statistics
     orig_stats = per_graph_statistics(original_data_list, show_progress=True)

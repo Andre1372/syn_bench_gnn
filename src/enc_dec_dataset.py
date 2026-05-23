@@ -104,6 +104,15 @@ class FeatureEncoderDecoder(ABC):
             Flattened 1D numpy array representing the learned parameters.
         """
 
+    @abstractmethod
+    def load_embedding(self, embedding: np.ndarray, class_id: int) -> None:
+        """Loads a flattened embedding vector for a class to enable sampling.
+
+        Args:
+            embedding: Flattened 1D numpy array representing the learned parameters.
+            class_id: The ID of the class to load the embedding for.
+        """
+
 
 class MomentsEncoderDecoder(FeatureEncoderDecoder):
     """Implementation of FeatureEncoderDecoder using statistical moments.
@@ -271,6 +280,18 @@ class MomentsEncoderDecoder(FeatureEncoderDecoder):
         
         return self._encodings[class_id].flatten()
 
+    def load_embedding(self, embedding: np.ndarray, class_id: int) -> None:
+        """Loads a flattened embedding vector for a class to enable sampling."""
+        if not 0 <= class_id < len(self._encodings):
+            raise ValueError(f"class_id {class_id} out of bounds (0-{len(self._encodings)-1}).")
+        
+        num_features = self._is_discrete.size
+        expected_size = self.k * num_features
+        if embedding.size != expected_size:
+            raise ValueError(f"Embedding size {embedding.size} does not match expected {expected_size}.")
+        
+        self._encodings[class_id] = embedding.reshape(self.k, num_features)
+
 
 class PercentileEncoderDecoder(FeatureEncoderDecoder):
     """Implementation of FeatureEncoderDecoder using percentiles.
@@ -393,6 +414,49 @@ class PercentileEncoderDecoder(FeatureEncoderDecoder):
             parts.append(corr_mat[np.triu_indices_from(corr_mat)])
             
         return np.concatenate(parts)
+
+    def load_embedding(self, embedding: np.ndarray, class_id: int) -> None:
+        """Loads a flattened embedding vector for a class to enable sampling."""
+        if not 0 <= class_id < len(self._encodings):
+            raise ValueError(f"class_id {class_id} out of bounds (0-{len(self._encodings)-1}).")
+            
+        num_features = self._is_discrete.size
+        q = np.arange(0, 1 + (self.percentile_size / 2), self.percentile_size)
+        q[q > 1.0] = 1.0
+        if q[-1] < 1.0: q = np.append(q, 1.0)
+        num_percentiles = len(q)
+        
+        enc_size = num_percentiles * num_features
+        
+        if self.replicate_correlation:
+            expected_triu_size = num_features * (num_features + 1) // 2
+            expected_size = enc_size + expected_triu_size
+            if embedding.size != expected_size:
+                raise ValueError(f"Embedding size {embedding.size} does not match expected {expected_size}.")
+                
+            enc_flat = embedding[:enc_size]
+            triu_flat = embedding[enc_size:]
+            
+            self._encodings[class_id] = enc_flat.reshape(num_percentiles, num_features)
+            
+            corr_mat = np.zeros((num_features, num_features))
+            triu_indices = np.triu_indices(num_features)
+            corr_mat[triu_indices] = triu_flat
+            corr_mat = corr_mat + corr_mat.T - np.diag(np.diag(corr_mat))
+            
+            # Symmetrize
+            corr_mat = (corr_mat + corr_mat.T) / 2.0
+            
+            # Project onto the nearest Positive Semi-Definite (PSD) matrix using eigenvalue clipping
+            eigenvalues, eigenvectors = np.linalg.eigh(corr_mat)
+            eigenvalues = np.maximum(eigenvalues, 1e-6)
+            corr_mat = (eigenvectors * eigenvalues) @ eigenvectors.T
+            
+            self._corr_matrices[class_id] = corr_mat
+        else:
+            if embedding.size != enc_size:
+                raise ValueError(f"Embedding size {embedding.size} does not match expected {enc_size}.")
+            self._encodings[class_id] = embedding.reshape(num_percentiles, num_features)
 
 
 class GMCMEncoderDecoder(FeatureEncoderDecoder):
@@ -542,6 +606,87 @@ class GMCMEncoderDecoder(FeatureEncoderDecoder):
             parts.append(cov_mat[np.triu_indices_from(cov_mat)])
             
         return np.concatenate(parts)
+
+    def load_embedding(self, embedding: np.ndarray, class_id: int) -> None:
+        """Loads a flattened embedding vector for a class to enable sampling."""
+        if not 0 <= class_id < len(self._encodings):
+            raise ValueError(f"class_id {class_id} out of bounds (0-{len(self._encodings)-1}).")
+            
+        num_features = self._is_discrete.size
+        q = np.arange(0, 1 + (self.percentile_size / 2), self.percentile_size)
+        q[q > 1.0] = 1.0
+        if q[-1] < 1.0: q = np.append(q, 1.0)
+        num_percentiles = len(q)
+        
+        enc_size = num_percentiles * num_features
+        weights_size = self.n_components
+        means_size = self.n_components * num_features
+        cov_triu_size = self.n_components * (num_features * (num_features + 1) // 2)
+        
+        expected_size = enc_size + weights_size + means_size + cov_triu_size
+        if embedding.size != expected_size:
+            raise ValueError(f"Embedding size {embedding.size} does not match expected {expected_size}.")
+            
+        # Unpack the arrays
+        idx = 0
+        enc_flat = embedding[idx : idx + enc_size]
+        idx += enc_size
+        
+        weights = embedding[idx : idx + weights_size]
+        idx += weights_size
+        
+        means_flat = embedding[idx : idx + means_size]
+        idx += means_size
+        
+        cov_triu_flat = embedding[idx:]
+        
+        # 1. Restore encodings
+        self._encodings[class_id] = enc_flat.reshape(num_percentiles, num_features)
+        
+        # 2. Restore GMM weights, means, covariances
+        means = means_flat.reshape(self.n_components, num_features)
+        
+        covariances = np.zeros((self.n_components, num_features, num_features))
+        triu_indices = np.triu_indices(num_features)
+        triu_len = num_features * (num_features + 1) // 2
+        
+        for i in range(self.n_components):
+            cov_triu = cov_triu_flat[i * triu_len : (i + 1) * triu_len]
+            cov_mat = np.zeros((num_features, num_features))
+            cov_mat[triu_indices] = cov_triu
+            cov_mat = cov_mat + cov_mat.T - np.diag(np.diag(cov_mat))
+            
+            # Symmetrize
+            cov_mat = (cov_mat + cov_mat.T) / 2.0
+            
+            # Project onto the nearest Positive Semi-Definite (PSD) matrix using eigenvalue clipping
+            eigenvalues, eigenvectors = np.linalg.eigh(cov_mat)
+            eigenvalues = np.maximum(eigenvalues, 1e-6)
+            cov_mat = (eigenvectors * eigenvalues) @ eigenvectors.T
+            
+            covariances[i] = cov_mat
+            
+        # 3. Create a fitted GaussianMixture instance
+        import scipy.linalg
+        gmm = GaussianMixture(n_components=self.n_components, covariance_type='full')
+        gmm.weights_ = weights
+        gmm.means_ = means
+        gmm.covariances_ = covariances
+        
+        # Compute precisions_cholesky_
+        precisions_chol = np.empty((self.n_components, num_features, num_features))
+        for k, covariance in enumerate(covariances):
+            try:
+                cov_chol = scipy.linalg.cholesky(covariance, lower=True)
+            except scipy.linalg.LinAlgError:
+                cov_chol = scipy.linalg.cholesky(covariance + 1e-6 * np.eye(num_features), lower=True)
+            precisions_chol[k] = scipy.linalg.solve_triangular(
+                cov_chol, np.eye(num_features), lower=True
+            ).T
+        gmm.precisions_cholesky_ = precisions_chol
+        gmm.converged_ = True
+        
+        self._gmm_models[class_id] = gmm
 
 
 KNOWN_SAMPLERS: dict[str, Callable[..., FeatureEncoderDecoder]] = {
