@@ -21,7 +21,7 @@ Some dependencies like `torch` need to be installed manually beforehand as noted
 
 ```bash
 # Create and activate the virtual environment
-python -m venv venv_sbg
+python3 -m venv venv_sbg
 source venv_sbg/bin/activate  # On Windows: venv_sbg\Scripts\activate
 
 # Install manually 

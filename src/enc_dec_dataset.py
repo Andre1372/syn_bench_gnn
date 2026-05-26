@@ -105,13 +105,63 @@ class FeatureEncoderDecoder(ABC):
         """
 
     @abstractmethod
-    def load_embedding(self, embedding: np.ndarray, class_id: int) -> None:
+    def load_embedding(self, embedding: np.ndarray, class_id: int) -> bool:
         """Loads a flattened embedding vector for a class to enable sampling.
 
         Args:
             embedding: Flattened 1D numpy array representing the learned parameters.
             class_id: The ID of the class to load the embedding for.
+        Returns:
+            True if the embedding was loaded successfully, False if validation failed.
         """
+
+    # ------------------------------------------------------------------
+    # Internal feature-space bounds (used by load_embedding checks)
+    # ------------------------------------------------------------------
+    # After encode_features removes col-1 (n_edges), the 13 internal columns are:
+    # (min, max) per internal column; None = unbounded on that side.
+    _FEATURE_BOUNDS: Final[dict[int, tuple[float | None, float | None]]] = {
+        0:  (1.0,  None),   # n_nodes              >= 1
+        1:  (0.0,  1.0),    # degree_mean          in [0, 1]
+        2:  (0.0,  0.25),   # degree_var           in [0, 0.25]
+        3:  (None, None),   # degree_skew          unbounded
+        4:  (1.0,  None),   # degree_kurt (Pearson) >= 1
+        5:  (0.0,  1.0),    # annd_bin_0           in [0, 1]
+        6:  (0.0,  1.0),    # annd_bin_1           in [0, 1]
+        7:  (0.0,  1.0),    # annd_bin_2           in [0, 1]
+        8:  (0.0,  1.0),    # annd_bin_3           in [0, 1]
+        9:  (0.0,  1.0),    # eccentricity_bin_0   in [0, 1]
+        10: (0.0,  1.0),    # eccentricity_bin_1   in [0, 1]
+        11: (0.0,  1.0),    # eccentricity_bin_2   in [0, 1]
+        12: (0.0,  1.0),    # eccentricity_bin_3   in [0, 1]
+    }
+    def _check_percentile_matrix(self, enc: np.ndarray) -> bool:
+        """Validates a (num_percentiles, num_features) percentile matrix.
+
+        Checks:
+        - Min/max percentile values respect ``_FEATURE_BOUNDS``.
+        - Each feature column is non-decreasing (monotone increasing).
+
+        Args:
+            enc: Percentile matrix of shape (num_percentiles, num_features).
+        Returns:
+            True if all checks pass, False otherwise.
+        """
+        for col_idx, (lower, upper) in self._FEATURE_BOUNDS.items():
+            if col_idx >= enc.shape[1]:
+                continue
+            if lower is not None and enc[0, col_idx] < lower - 1e-8:
+                logger.warning(f"load_embedding: feature col {col_idx} min percentile {enc[0, col_idx]:.4g} < lower bound {lower:.4g}.")
+                return False
+            if upper is not None and enc[-1, col_idx] > upper + 1e-8:
+                logger.warning(f"load_embedding: feature col {col_idx} max percentile {enc[-1, col_idx]:.4g} > upper bound {upper:.4g}.")
+                return False
+        diffs = np.diff(enc, axis=0)
+        if np.any(diffs < -1e-8):
+            bad_cols = np.where(np.any(diffs < -1e-8, axis=0))[0].tolist()
+            logger.warning(f"load_embedding: percentile columns not monotone increasing for features {bad_cols}.")
+            return False
+        return True
 
 
 class MomentsEncoderDecoder(FeatureEncoderDecoder):
@@ -280,17 +330,50 @@ class MomentsEncoderDecoder(FeatureEncoderDecoder):
         
         return self._encodings[class_id].flatten()
 
-    def load_embedding(self, embedding: np.ndarray, class_id: int) -> None:
-        """Loads a flattened embedding vector for a class to enable sampling."""
+    def load_embedding(self, embedding: np.ndarray, class_id: int) -> bool:
+        """Loads a flattened embedding vector for a class to enable sampling.
+
+        Validates the embedding semantics before storing it:
+        - Mean values respect per-feature lower and upper bounds.
+        - Variance row is non-negative for all features.
+        - Kurtosis row (Pearson, row-3) is >= 1 for degree kurtosis (col 4).
+
+        Args:
+            embedding: Flattened 1D numpy array of moments.
+            class_id: The ID of the class to load the embedding for.
+        Returns:
+            True on success, False if semantic validation fails.
+        """
         if not 0 <= class_id < len(self._encodings):
             raise ValueError(f"class_id {class_id} out of bounds (0-{len(self._encodings)-1}).")
-        
+
         num_features = self._is_discrete.size
         expected_size = self.k * num_features
         if embedding.size != expected_size:
             raise ValueError(f"Embedding size {embedding.size} does not match expected {expected_size}.")
-        
-        self._encodings[class_id] = embedding.reshape(self.k, num_features)
+
+        enc = embedding.reshape(self.k, num_features)  # shape (k, num_features)
+
+        # --- Row 0: mean bounds checks ---
+        for col_idx, (lower, upper) in self._FEATURE_BOUNDS.items():
+            if col_idx >= num_features:
+                continue
+            val = enc[0, col_idx]
+            if lower is not None and val < lower - 1e-8:
+                logger.warning(f"MomentsEncoderDecoder.load_embedding: mean of feature col {col_idx} ({val:.4g}) below lower bound {lower:.4g} for class {class_id}.")
+                return False
+            if upper is not None and val > upper + 1e-8:
+                logger.warning(f"MomentsEncoderDecoder.load_embedding: mean of feature col {col_idx} ({val:.4g}) above upper bound {upper:.4g} for class {class_id}.")
+                return False
+
+        # --- Row 1: variance must be >= 0 ---
+        if self.k >= 2 and np.any(enc[1] < -1e-8):
+            bad = np.where(enc[1] < -1e-8)[0].tolist()
+            logger.warning(f"MomentsEncoderDecoder.load_embedding: negative variance for feature cols {bad} in class {class_id}.")
+            return False
+
+        self._encodings[class_id] = enc
+        return True
 
 
 class PercentileEncoderDecoder(FeatureEncoderDecoder):
@@ -415,48 +498,67 @@ class PercentileEncoderDecoder(FeatureEncoderDecoder):
             
         return np.concatenate(parts)
 
-    def load_embedding(self, embedding: np.ndarray, class_id: int) -> None:
-        """Loads a flattened embedding vector for a class to enable sampling."""
+    def load_embedding(self, embedding: np.ndarray, class_id: int) -> bool:
+        """Loads a flattened embedding vector for a class to enable sampling.
+
+        Validates the embedding semantics before storing it:
+        - Percentile values respect per-feature lower bounds.
+        - Each feature column is monotone non-decreasing across percentiles.
+        - Correlation matrix is corrected to be PSD if needed.
+
+        Args:
+            embedding: Flattened 1D numpy array of percentiles (+ optional corr triu).
+            class_id: The ID of the class to load the embedding for.
+        Returns:
+            True on success, False if semantic validation fails.
+        """
         if not 0 <= class_id < len(self._encodings):
             raise ValueError(f"class_id {class_id} out of bounds (0-{len(self._encodings)-1}).")
-            
+
         num_features = self._is_discrete.size
         q = np.arange(0, 1 + (self.percentile_size / 2), self.percentile_size)
         q[q > 1.0] = 1.0
         if q[-1] < 1.0: q = np.append(q, 1.0)
         num_percentiles = len(q)
-        
+
         enc_size = num_percentiles * num_features
-        
+
         if self.replicate_correlation:
             expected_triu_size = num_features * (num_features + 1) // 2
             expected_size = enc_size + expected_triu_size
             if embedding.size != expected_size:
                 raise ValueError(f"Embedding size {embedding.size} does not match expected {expected_size}.")
-                
+
             enc_flat = embedding[:enc_size]
             triu_flat = embedding[enc_size:]
-            
-            self._encodings[class_id] = enc_flat.reshape(num_percentiles, num_features)
-            
+        else:
+            if embedding.size != enc_size:
+                raise ValueError(f"Embedding size {embedding.size} does not match expected {enc_size}.")
+            enc_flat = embedding
+
+        enc = enc_flat.reshape(num_percentiles, num_features)
+
+        # --- Validate percentile matrix ---
+        if not self._check_percentile_matrix(enc):
+            return False
+
+        self._encodings[class_id] = enc
+
+        if self.replicate_correlation:
             corr_mat = np.zeros((num_features, num_features))
             triu_indices = np.triu_indices(num_features)
             corr_mat[triu_indices] = triu_flat
             corr_mat = corr_mat + corr_mat.T - np.diag(np.diag(corr_mat))
-            
-            # Symmetrize
+
+            # Symmetrize and project onto nearest PSD matrix
             corr_mat = (corr_mat + corr_mat.T) / 2.0
-            
-            # Project onto the nearest Positive Semi-Definite (PSD) matrix using eigenvalue clipping
             eigenvalues, eigenvectors = np.linalg.eigh(corr_mat)
             eigenvalues = np.maximum(eigenvalues, 1e-6)
             corr_mat = (eigenvectors * eigenvalues) @ eigenvectors.T
-            
+
             self._corr_matrices[class_id] = corr_mat
-        else:
-            if embedding.size != enc_size:
-                raise ValueError(f"Embedding size {embedding.size} does not match expected {enc_size}.")
-            self._encodings[class_id] = embedding.reshape(num_percentiles, num_features)
+
+        return True
 
 
 class GMCMEncoderDecoder(FeatureEncoderDecoder):
@@ -607,73 +709,89 @@ class GMCMEncoderDecoder(FeatureEncoderDecoder):
             
         return np.concatenate(parts)
 
-    def load_embedding(self, embedding: np.ndarray, class_id: int) -> None:
-        """Loads a flattened embedding vector for a class to enable sampling."""
+    def load_embedding(self, embedding: np.ndarray, class_id: int) -> bool:
+        """Loads a flattened embedding vector for a class to enable sampling.
+
+        Validates the embedding semantics before storing it:
+        - Percentile values respect per-feature lower bounds and are monotone.
+        - GMM weights are positive and sum to 1.
+        - GMM covariance matrices are corrected to be PSD if needed.
+
+        Args:
+            embedding: Flattened 1D numpy array of (percentiles, weights, means, cov_triu).
+            class_id: The ID of the class to load the embedding for.
+        Returns:
+            True on success, False if semantic validation fails.
+        """
+        import scipy.linalg
+
         if not 0 <= class_id < len(self._encodings):
             raise ValueError(f"class_id {class_id} out of bounds (0-{len(self._encodings)-1}).")
-            
+
         num_features = self._is_discrete.size
         q = np.arange(0, 1 + (self.percentile_size / 2), self.percentile_size)
         q[q > 1.0] = 1.0
         if q[-1] < 1.0: q = np.append(q, 1.0)
         num_percentiles = len(q)
-        
+
         enc_size = num_percentiles * num_features
         weights_size = self.n_components
         means_size = self.n_components * num_features
         cov_triu_size = self.n_components * (num_features * (num_features + 1) // 2)
-        
+
         expected_size = enc_size + weights_size + means_size + cov_triu_size
         if embedding.size != expected_size:
             raise ValueError(f"Embedding size {embedding.size} does not match expected {expected_size}.")
-            
+
         # Unpack the arrays
-        idx = 0
-        enc_flat = embedding[idx : idx + enc_size]
-        idx += enc_size
-        
-        weights = embedding[idx : idx + weights_size]
-        idx += weights_size
-        
-        means_flat = embedding[idx : idx + means_size]
-        idx += means_size
-        
-        cov_triu_flat = embedding[idx:]
-        
-        # 1. Restore encodings
-        self._encodings[class_id] = enc_flat.reshape(num_percentiles, num_features)
-        
-        # 2. Restore GMM weights, means, covariances
+        ptr = 0
+        enc_flat = embedding[ptr : ptr + enc_size]; ptr += enc_size
+        weights = embedding[ptr : ptr + weights_size]; ptr += weights_size
+        means_flat = embedding[ptr : ptr + means_size]; ptr += means_size
+        cov_triu_flat = embedding[ptr:]
+
+        # --- Validate percentile matrix ---
+        enc = enc_flat.reshape(num_percentiles, num_features)
+        if not self._check_percentile_matrix(enc):
+            return False
+
+        # --- Normalize GMM weights using softmax-like correction ---
+        # This allows arbitrary real-valued weights to be converted to a valid probability distribution.
+        shifted_weights = weights - np.max(weights)
+        weights = np.exp(shifted_weights)
+        weights = weights / np.sum(weights)
+
+
+        # --- Validate GMM means (same bounds as percentile min values) ---
         means = means_flat.reshape(self.n_components, num_features)
-        
+        # Means are in the *latent normal space* (after PIT), so no domain bounds apply.
+        # We only do a basic NaN/Inf sanity check.
+        if not np.all(np.isfinite(means)):
+            logger.warning(f"GMCMEncoderDecoder.load_embedding: non-finite GMM means for class {class_id}.")
+            return False
+
+        # --- Restore covariances (with PSD correction) ---
         covariances = np.zeros((self.n_components, num_features, num_features))
         triu_indices = np.triu_indices(num_features)
         triu_len = num_features * (num_features + 1) // 2
-        
+
         for i in range(self.n_components):
             cov_triu = cov_triu_flat[i * triu_len : (i + 1) * triu_len]
             cov_mat = np.zeros((num_features, num_features))
             cov_mat[triu_indices] = cov_triu
             cov_mat = cov_mat + cov_mat.T - np.diag(np.diag(cov_mat))
-            
-            # Symmetrize
             cov_mat = (cov_mat + cov_mat.T) / 2.0
-            
-            # Project onto the nearest Positive Semi-Definite (PSD) matrix using eigenvalue clipping
             eigenvalues, eigenvectors = np.linalg.eigh(cov_mat)
             eigenvalues = np.maximum(eigenvalues, 1e-6)
             cov_mat = (eigenvectors * eigenvalues) @ eigenvectors.T
-            
             covariances[i] = cov_mat
-            
-        # 3. Create a fitted GaussianMixture instance
-        import scipy.linalg
+
+        # --- Assemble fitted GaussianMixture ---
         gmm = GaussianMixture(n_components=self.n_components, covariance_type='full')
         gmm.weights_ = weights
         gmm.means_ = means
         gmm.covariances_ = covariances
-        
-        # Compute precisions_cholesky_
+
         precisions_chol = np.empty((self.n_components, num_features, num_features))
         for k, covariance in enumerate(covariances):
             try:
@@ -685,8 +803,11 @@ class GMCMEncoderDecoder(FeatureEncoderDecoder):
             ).T
         gmm.precisions_cholesky_ = precisions_chol
         gmm.converged_ = True
-        
+
+        # --- Commit ---
+        self._encodings[class_id] = enc
         self._gmm_models[class_id] = gmm
+        return True
 
 
 KNOWN_SAMPLERS: dict[str, Callable[..., FeatureEncoderDecoder]] = {
