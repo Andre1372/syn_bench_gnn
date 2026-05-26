@@ -71,7 +71,7 @@ def cleanup_incompatible_dataset(dataset_name: str, data_dir: Path) -> None:
             logger.error(f"Error while deleting {dataset_name}: {e}")
 
 
-def display_results(stats_list: list[dict[str, Any]], discarded_structural: list[str], discarded_f1: list[str], ran_benchmark: bool = True) -> None:
+def display_results(stats_list: list[dict[str, Any]], discarded_structural: list[str], discarded_f1: list[str], ran_benchmark: bool = True, min_f1: float = MIN_F1_THRESHOLD, feature_type: str = "log_bin_deg") -> None:
     """Formats and prints the compatible and discarded dataset statistics to the console."""
     if discarded_structural:
         print("\n" + "="*80)
@@ -82,7 +82,7 @@ def display_results(stats_list: list[dict[str, Any]], discarded_structural: list
 
     if ran_benchmark and discarded_f1:
         print("\n" + "="*80)
-        print(f"Discarded by GNN benchmark (neither config reached F1 >= {MIN_F1_THRESHOLD}) ({len(discarded_f1)})")
+        print(f"Discarded by GNN benchmark (did not reach F1 >= {min_f1} for both GCN & GIN on {feature_type}) ({len(discarded_f1)})")
         print("="*80)
         print(", ".join(discarded_f1))
         print("="*80)
@@ -98,7 +98,7 @@ def display_results(stats_list: list[dict[str, Any]], discarded_structural: list
             return f"{val:.3f}"
 
         def _pass(val: float) -> str:
-            mark = "\u2713" if val >= MIN_F1_THRESHOLD else "\u2717"
+            mark = "\u2713" if val >= min_f1 else "\u2717"
             return f"{val:.3f} {mark}"
 
         # Format output columns for readability
@@ -109,15 +109,13 @@ def display_results(stats_list: list[dict[str, Any]], discarded_structural: list
             "avg nodes +- std": df.apply(lambda r: f"{r['avg_nodes']:.1f} +- {r['std_nodes']:.1f}", axis=1),
             "avg edges +- std": df.apply(lambda r: f"{r['avg_edges']:.1f} +- {r['std_edges']:.1f}", axis=1),
             "node feat": df["node_features"],
-            "GCN dummy F1": df["gcn_dummy_mean_f1"].map(_pass),
-            "GIN dummy F1": df["gin_dummy_mean_f1"].map(_pass),
-            "GCN logbin F1": df["gcn_log_bin_mean_f1"].map(_pass),
-            "GIN logbin F1": df["gin_log_bin_mean_f1"].map(_pass),
+            f"GCN {feature_type} F1": df[f"gcn_{feature_type}_mean_f1"].map(_pass),
+            f"GIN {feature_type} F1": df[f"gin_{feature_type}_mean_f1"].map(_pass),
             "kept config": df["kept_config"],
         })
 
         print("\n" + "="*130)
-        print(f"Final Compatible Datasets (structural + at least one config with GCN & GIN F1 >= {MIN_F1_THRESHOLD})")
+        print(f"Final Compatible Datasets (structural + GCN & GIN F1 >= {min_f1} on {feature_type})")
         print("="*130)
     else:
         # Format simpler output columns if benchmark was skipped
@@ -150,9 +148,11 @@ def main() -> None:
         action="store_true",
         help="Run GNN benchmark for filtering (otherwise, only use structural criteria).",
     )
-    args = parser.parse_args()
-
-    dataset_names = [
+    parser.add_argument(
+        "--dataset",
+        type=str,
+        nargs="+",
+        default=[
         "AIDS", "BZR", "COX2", "DHFR", "FRANKENSTEIN", "Mutagenicity", "MUTAG", "NCI1", "NCI109",
         "PTC_FM", "PTC_FR", "PTC_MM", "PTC_MR", "DD", "KKI", "OHSU", "Peking_1", "PROTEINS", 
         "FIRSTMM_DB", "Letter_high", "IMDB-BINARY", "REDDIT-BINARY",
@@ -164,7 +164,32 @@ def main() -> None:
         # "SYNTHETIC", "Synthie", --> Discarded because synthetic
         # "BZR_MD", "COX2_MD", "DHFR_MD", "ER_MD"  --> Discarded because fully connected
         # "dblp_ct1", "facebook_ct1", "highschool_ct1", "infectious_ct1", "mit_ct1", "tumblr_ct1" --> Discarded because problematic
-    ]
+        ],
+        help="One or more TUDataset names to process.",
+    )
+    parser.add_argument(
+        "--runs",
+        type=int,
+        default=10,
+        help="Number of runs for GNN benchmark.",
+    )
+    parser.add_argument(
+        "--min_f1",
+        type=float,
+        default=0.65,
+        help="Minimum mean F1 threshold to keep the dataset.",
+    )
+    parser.add_argument(
+        "--feature",
+        type=str,
+        default="log_bin_deg",
+        choices=["constant", "log_bin_deg", "random_sample", "degree_ordered", "neighbor_degree_ordered"],
+        help="The node feature assignment strategy (assigner) to benchmark.",
+    )
+    args = parser.parse_args()
+
+    dataset_names = args.dataset
+    min_f1 = args.min_f1
 
     project_root = Path(__file__).parent.resolve()
     data_dir = project_root / "data"
@@ -172,7 +197,7 @@ def main() -> None:
 
     structurally_compatible: list[dict[str, Any]] = []
     discarded_structural: list[str] = []
-    logger.info(f"Processing {len(dataset_names)} TUDatasets...")
+    logger.info(f"Processing {len(dataset_names)} TUDatasets: {dataset_names}...")
 
     # --- Phase 1: Structural filtering ---
     for name in tqdm(dataset_names, desc="Phase 1 - structural filter"):
@@ -192,7 +217,7 @@ def main() -> None:
 
     if not args.run_benchmark:
         logger.info("GNN benchmark skipped as requested. Keeping all structurally compatible datasets.")
-        display_results(structurally_compatible, discarded_structural, [], ran_benchmark=False)
+        display_results(structurally_compatible, discarded_structural, [], ran_benchmark=False, min_f1=min_f1, feature_type=args.feature)
         return
 
     # --- Phase 2: GNN benchmark filtering ---
@@ -201,8 +226,8 @@ def main() -> None:
 
     for stats in tqdm(structurally_compatible, desc="Phase 2 - GNN benchmark"):
         name = stats["dataset"]
-        bench_config = BenchmarkConfig(runs=20, epochs=50)
-        logger.info(f"Benchmarking '{name}' ({bench_config.runs} runs, {bench_config.epochs} epochs) – dummy + log-bin...")
+        bench_config = BenchmarkConfig(runs=args.runs, epochs=50, feature_type=args.feature)
+        logger.info(f"Benchmarking '{name}' ({bench_config.runs} runs, 50 epochs) – {args.feature}...")
         bench = benchmark_dataset(name, data_dir, bench_config)
 
         if bench is None:
@@ -211,39 +236,30 @@ def main() -> None:
             cleanup_incompatible_dataset(name, data_dir)
             continue
 
-        gcn_dummy   = bench["gcn_dummy_mean_f1"]
-        gin_dummy   = bench["gin_dummy_mean_f1"]
-        gcn_logbin  = bench["gcn_log_bin_mean_f1"]
-        gin_logbin  = bench["gin_log_bin_mean_f1"]
+        gcn_f1 = bench[f"gcn_{args.feature}_mean_f1"]
+        gin_f1 = bench[f"gin_{args.feature}_mean_f1"]
 
-        dummy_ok  = gcn_dummy  >= MIN_F1_THRESHOLD and gin_dummy  >= MIN_F1_THRESHOLD
-        logbin_ok = gcn_logbin >= MIN_F1_THRESHOLD and gin_logbin >= MIN_F1_THRESHOLD
+        f1_ok = gcn_f1 >= min_f1 and gin_f1 >= min_f1
 
         logger.info(
-            f"'{name}': dummy GCN={gcn_dummy:.3f} GIN={gin_dummy:.3f} ({'OK' if dummy_ok else 'FAIL'}) | "
-            f"log-bin GCN={gcn_logbin:.3f} GIN={gin_logbin:.3f} ({'OK' if logbin_ok else 'FAIL'})"
+            f"'{name}': {args.feature} GCN={gcn_f1:.3f} GIN={gin_f1:.3f} ({'OK' if f1_ok else 'FAIL'})"
         )
 
-        if dummy_ok or logbin_ok:
-            kept = []
-            if dummy_ok:  kept.append("dummy")
-            if logbin_ok: kept.append("log-bin")
+        if f1_ok:
             final_results.append({
                 **stats,
-                "gcn_dummy_mean_f1":   gcn_dummy,
-                "gin_dummy_mean_f1":   gin_dummy,
-                "gcn_log_bin_mean_f1": gcn_logbin,
-                "gin_log_bin_mean_f1": gin_logbin,
-                "kept_config":         " + ".join(kept),
+                f"gcn_{args.feature}_mean_f1": gcn_f1,
+                f"gin_{args.feature}_mean_f1": gin_f1,
+                "kept_config": args.feature,
             })
         else:
             discarded_f1.append(name)
             logger.info(
-                f"'{name}' discarded: no config reached F1 >= {MIN_F1_THRESHOLD} for both GCN and GIN. Cleaning up..."
+                f"'{name}' discarded: GCN & GIN did not both reach F1 >= {min_f1} for {args.feature}. Cleaning up..."
             )
             cleanup_incompatible_dataset(name, data_dir)
 
-    display_results(final_results, discarded_structural, discarded_f1, ran_benchmark=True)
+    display_results(final_results, discarded_structural, discarded_f1, ran_benchmark=True, min_f1=min_f1, feature_type=args.feature)
 
 
 if __name__ == "__main__":

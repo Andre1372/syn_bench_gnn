@@ -60,6 +60,7 @@ class BenchmarkConfig:
         lr: Learning rate for the Adam optimizer.
         sample_size: Maximum number of graphs to subsample per run.
             Set to None to use the full dataset.
+        feature_type: Node feature strategy (assigner) to benchmark.
     """
     runs: int = 10
     epochs: int = 50
@@ -69,6 +70,7 @@ class BenchmarkConfig:
     dropout: float = 0.1
     lr: float = 5e-4
     sample_size: int | None = 400
+    feature_type: str = "log_bin_deg"
 
 
 # ------------------------------------------------------------------
@@ -199,7 +201,7 @@ def benchmark_dataset(
     verbose: bool = False,
     project_root: Path | None = None,
 ) -> dict[str, float] | None:
-    """Runs a GNN benchmark (GCN and GIN) on a dataset using both dummy and log-binned features.
+    """Runs a GNN benchmark (GCN and GIN) on a dataset using the specified assigner.
 
     Args:
         dataset_name: Name of the TUDataset.
@@ -208,56 +210,31 @@ def benchmark_dataset(
         verbose: If True, uses tqdm, saves plots, and logs a summary table.
         project_root: Required only if verbose=True to save results.
     Returns:
-        Dict with keys ``'gcn_dummy_mean_f1'``, ``'gin_dummy_mean_f1'``,
-        ``'gcn_log_bin_mean_f1'``, ``'gin_log_bin_mean_f1'``
+        Dict with keys ``'gcn_{feature_type}_mean_f1'``, ``'gin_{feature_type}_mean_f1'``
         or *None* if any step fails.
     """
     if config is None:
         config = BenchmarkConfig()
     if verbose:
-        logger.info(f"--- Starting Benchmark for Dataset: {dataset_name} ---")
+        logger.info(f"--- Starting Benchmark for Dataset: {dataset_name} ({config.feature_type}) ---")
         if project_root is None:
             project_root = Path(__file__).parent.resolve()
 
-    # --- Dummy features ---
+    feat_type = config.feature_type
     try:
-        dummy_data, dummy_meta = preprocess_and_save_original_dataset(
-            dataset_name, data_dir, use_log_bin_deg=False,
-        )
+        data, meta = preprocess_and_save_original_dataset(dataset_name, data_dir, feature_type=feat_type, out_filename=f"{dataset_name}_original_{feat_type}.pt")
     except Exception as e:
-        logger.error(f"Failed to load dataset '{dataset_name}' (dummy): {e}")
+        logger.error(f"Failed to load dataset '{dataset_name}' ({feat_type}): {e}")
         return None
 
-    dummy_res = _run_benchmark_with_features(
-        dataset_name, dummy_data,
-        num_classes=dummy_meta["num_classes"],
-        in_dim=dummy_meta["in_dim"],
-        feature_tag="dummy",
+    res = _run_benchmark_with_features(
+        dataset_name, data,
+        num_classes=meta["num_classes"],
+        in_dim=meta["in_dim"],
+        feature_tag=feat_type,
         config=config, verbose=verbose, project_root=project_root,
     )
-    if dummy_res is None:
-        return None
-
-    # --- Log-binned degree features ---
-    try:
-        logbin_data, logbin_meta = preprocess_and_save_original_dataset(
-            dataset_name, data_dir, use_log_bin_deg=True,
-        )
-    except Exception as e:
-        logger.error(f"Failed to load dataset '{dataset_name}' (log_bin): {e}")
-        return None
-
-    logbin_res = _run_benchmark_with_features(
-        dataset_name, logbin_data,
-        num_classes=logbin_meta["num_classes"],
-        in_dim=logbin_meta["in_dim"],
-        feature_tag="log_bin",
-        config=config, verbose=verbose, project_root=project_root,
-    )
-    if logbin_res is None:
-        return None
-
-    return {**dummy_res, **logbin_res}
+    return res
 
 
 # ------------------------------------------------------------------
@@ -329,6 +306,9 @@ def _parse_args() -> argparse.Namespace:
                         help="Training epochs per run (default: 50).")
     parser.add_argument("--batch-size", type=int, default=BenchmarkConfig.batch_size,
                         help=f"Mini-batch size (default: {BenchmarkConfig.batch_size}).")
+    parser.add_argument("--feature", type=str, default="log_bin_deg",
+                        choices=["constant", "log_bin_deg", "random_sample", "degree_ordered", "neighbor_degree_ordered"],
+                        help="The node feature assignment strategy (assigner) to use.")
     return parser.parse_args()
 
 
@@ -342,7 +322,7 @@ def _run_cli() -> None:
         exp_suffix = "multiple_datasets"
     setup_console_logging(project_root, f"benchmark_{exp_suffix}")
 
-    config = BenchmarkConfig(runs=args.runs, epochs=args.epochs, batch_size=args.batch_size)
+    config = BenchmarkConfig(runs=args.runs, epochs=args.epochs, batch_size=args.batch_size, feature_type=args.feature)
     data_dir = project_root / "data"
 
     for dataset_name in args.dataset:
