@@ -14,7 +14,7 @@ from torch_geometric.loader import DataLoader
 from torch_geometric.nn import global_mean_pool, global_max_pool
 from torch_geometric.nn.models import GCN, GIN
 
-from src.data_utils import make_loaders, DatasetPT, remove_features
+from src.data_utils import make_loaders, DatasetPT
 from src.graph_analysis import per_graph_statistics, aggregate_statistics
 
 logger = logging.getLogger(__name__)

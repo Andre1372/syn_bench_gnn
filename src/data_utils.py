@@ -14,9 +14,50 @@ from torch_geometric.loader import DataLoader
 from torch_geometric.datasets import TUDataset
 from torch_geometric.utils import to_undirected
 
+from src.node_features import (
+    NodeFeatureAssigner,
+    GlobalFeatureAssigner,
+    ConstantFeatureAssigner,
+    LogBinDegFeatureAssigner,
+    RandomSampleFeatureAssigner,
+    DegreeOrderedFeatureAssigner,
+    NeighborDegreeOrderedFeatureAssigner,
+    is_per_graph_strategy,
+    node_feature_assigner_from_metadata,
+    ALL_FEATURE_TYPES,
+)
 
 logger = logging.getLogger(__name__)
 
+
+# ---------------------------------------------------------------------------
+# Internal helpers
+# ---------------------------------------------------------------------------
+
+class _PerGraphMetadataSentinel:
+    """Lightweight stand-in for per-graph assigners during dataset preprocessing.
+
+    Per-graph assigners (``random_sample``, ``degree_ordered``, …) keep the
+    original TUDataset features as-is and do not transform the data_list. We
+    still need something with ``.in_dim`` and ``.to_metadata()`` to produce the
+    ``.pt`` metadata payload, so we use this tiny object instead of a dynamically
+    generated anonymous type.
+
+    Args:
+        feature_type: The ``FEATURE_TYPE`` string of the per-graph strategy.
+        in_dim: Feature dimensionality inferred from the data.
+    """
+
+    def __init__(self, feature_type: str, in_dim: int) -> None:
+        self._feature_type = feature_type
+        self._in_dim = in_dim
+
+    @property
+    def in_dim(self) -> int:
+        return self._in_dim
+
+    def to_metadata(self) -> dict:
+        return {"feature_type": self._feature_type, "in_dim": self._in_dim}
 
 # ------------------------------------------------------------------
 # Load data utilities
@@ -158,123 +199,6 @@ def make_loaders(dataset: list[Data], split_indices: tuple[list[int], list[int],
     return train_loader, val_loader, test_loader
 
 
-def remove_features(data: Data) -> Data:
-    """Sets all node features to 1 for a given graph.
-
-    Args:
-        data: Input PyG Data object.
-    Returns:
-        A cloned Data object with node features set to all ones, 
-        maintaining the original feature dimensionality.
-    """
-    num_nodes = data.num_nodes
-    x = torch.ones((num_nodes, 1), dtype=torch.float32)
-    new_data = Data(
-        x=x,
-        edge_index=data.edge_index.clone(),
-        y=data.y.clone() if data.y is not None else None,
-        num_nodes=num_nodes
-    )
-    return new_data
-
-
-# ------------------------------------------------------------------
-# Log-binned degree feature utilities
-# ------------------------------------------------------------------
-
-def compute_log_bin_edges(dataset: list[Data], base: float = 2.0, min_tail_fraction: float = 0.01) -> list[float]:
-    """Computes logarithmic bin edges for the global degree distribution of a dataset.
-
-    Bin boundaries follow a geometric progression (``base``^0, ``base``^1, …).
-    The algorithm then merges upper bins whose node count falls below
-    ``min_tail_fraction`` of the total number of nodes in the dataset,
-    preventing near-empty bins for high-degree hubs.
-
-    Args:
-        dataset: A list of PyG Data objects from which degrees are collected.
-        base: Base of the logarithmic progression. Defaults to 2.
-        min_tail_fraction: Minimum fraction of total nodes required in the last bin.
-            Bins are merged until this threshold is met. Defaults to 0.01.
-    Returns:
-        A sorted list of bin-edge values (floats), starting from 0.0.
-        The last edge is effectively +inf (represented as ``float('inf')``).
-    """
-    # Collect all node degrees across the whole dataset
-    all_degrees: list[int] = []
-    for data in dataset:
-        if data.edge_index is not None and data.edge_index.numel() > 0:
-            # Count degree from edge_index (undirected: each edge appears twice)
-            degrees = torch.zeros(data.num_nodes, dtype=torch.long)
-            degrees.scatter_add_(0, data.edge_index[0], torch.ones(data.edge_index.size(1), dtype=torch.long))
-            all_degrees.extend(degrees.tolist())
-        else:
-            # Isolated nodes have degree 0
-            all_degrees.extend([0] * data.num_nodes)
-
-    total_nodes = len(all_degrees)
-    if total_nodes == 0:
-        return [0.0, float('inf')]
-
-    max_degree = max(all_degrees)
-    min_tail_count = max(1, int(min_tail_fraction * total_nodes))
-
-    # Build candidate edges: 0, 1, base, base^2, ..., first power > max_degree
-    edges: list[float] = [0.0]
-    power = 0
-    while True:
-        val = base ** power
-        edges.append(float(val))
-        if val > max_degree:
-            break
-        power += 1
-
-    # Merge upper bins until the last bin has enough nodes
-    while len(edges) > 2:
-        # Count nodes in the last bin [edges[-2], inf)
-        last_lower = edges[-2]
-        count_last = sum(1 for d in all_degrees if d >= last_lower)
-        if count_last >= min_tail_count:
-            break
-        # Remove the second-to-last edge, effectively merging the two upper bins
-        edges.pop(-2)
-
-    # Replace the last finite edge with +inf as a sentinel
-    edges[-1] = float('inf')
-    logger.debug(
-        f"compute_log_bin_edges: {len(edges) - 1} bins, edges={edges[:-1]} + [inf], "
-        f"total_nodes={total_nodes}, max_degree={max_degree}"
-    )
-    return edges
-
-
-def apply_log_bin_features(g: ig.Graph, bin_edges: list[float]) -> torch.Tensor:
-    """Assigns one-hot log-binned degree features to all nodes of an igraph graph.
-
-    Each node's degree is mapped to one of the bins defined by ``bin_edges``
-    and encoded as a one-hot vector of length ``len(bin_edges) - 1``.
-
-    Args:
-        g: The source igraph Graph.
-        bin_edges: Sorted bin boundaries as produced by :func:`compute_log_bin_edges`.
-            Must have at least 2 elements.
-    Returns:
-        A tensor of shape (num_nodes, num_bins) carrying the one-hot feature matrix.
-    """
-    num_bins = len(bin_edges) - 1
-    degrees = torch.tensor(g.degree(), dtype=torch.long)  # shape: (num_nodes,)
-
-    # Map each degree to its bin index using searchsorted on the *right* edges
-    # bin_edges = [0, 1, 2, 4, 8, …, inf]; we search within edges[1:]
-    upper_edges = torch.tensor(bin_edges[1:], dtype=torch.float32)  # excludes the initial 0
-    # searchsorted on upper_edges gives the bin index (0-based)
-    bin_indices = torch.bucketize(degrees.float(), upper_edges, right=True).clamp(0, num_bins - 1)
-
-    # One-hot encode
-    x = torch.zeros(len(degrees), num_bins, dtype=torch.float32)
-    x.scatter_(1, bin_indices.unsqueeze(1), 1.0)
-    return x
-
-
 def flatten_stats(per_graph_statistics: dict[str, Any]) -> tuple[np.ndarray, dict[str, int]]:
     """Flattens a dictionary of graph statistics into a 1D NumPy array.
 
@@ -366,36 +290,43 @@ def preprocess_and_save_original_dataset(
     data_dir: Path,
     max_size: int | None = None,
     rng: np.random.Generator | None = None,
-    use_log_bin_deg: bool = False,
+    feature_type: str = "log_bin_deg",
     out_filename: str | None = None,
 ) -> tuple[list[Data], dict[str, Any]]:
     """Preprocesses a TUDataset, applies node features, computes statistics, and saves to .pt.
 
     If ``max_size`` is set and the dataset is larger, it is down-sampled
     **before** statistics are computed and the file is written.
-    
+
     Args:
         dataset_name: Name of the TUDataset.
         data_dir: Directory where the original dataset will be downloaded and saved.
         max_size: If not None, down-sample to at most this many graphs while preserving label and node/edge-count distributions.
-        rng: NumPy Generator forwarded to :func:`sample_dataset`.  If *None* a fresh generator is used when sampling is needed.
-        use_log_bin_deg: If ``True``, node features are one-hot log-binned degree vectors
-            computed globally over the dataset.  If ``False`` (default), all-ones dummy
-            features are used.
-        out_filename: Optional filename (including ``.pt`` extension) for the saved file.
-            Defaults to ``{dataset_name}_original.pt``.
+        rng: NumPy Generator forwarded to :func:`sample_dataset`. If *None* a fresh generator is used when sampling is needed.
+        feature_type: Node feature strategy. One of: ``'constant'``, ``'log_bin_deg'``, ``'random_sample'``, ``'degree_ordered'``, ``'neighbor_degree_ordered'``.
+        out_filename: Optional filename (including ``.pt`` extension) for the saved file. Defaults to ``{dataset_name}_original.pt``.
     Returns:
         The preprocessed (and possibly sampled) list of Data objects and the metadata dictionary.
     """
     _fname = out_filename if out_filename else f"{dataset_name}_original.pt"
     orig_pt_path = data_dir / dataset_name / _fname
-    
-    feat_tag = "log_bin_deg" if use_log_bin_deg else "dummy"
-    logger.info(f"Preprocessing and computing statistics for original dataset: {dataset_name} (features='{feat_tag}')...")
+
+    logger.info(f"Preprocessing and computing statistics for original dataset: {dataset_name} (features='{feature_type}')...")
     raw_dataset = TUDataset(root=str(data_dir), name=dataset_name)
     num_classes = raw_dataset.num_classes
 
-    original_data_list = [remove_features(d) for d in raw_dataset]
+    if is_per_graph_strategy(feature_type):
+        # Preserve original TUDataset node features.
+        original_data_list = [
+            Data(x=d.x.float() if d.x is not None else None, edge_index=d.edge_index, y=d.y, num_nodes=d.num_nodes)
+            for d in raw_dataset
+        ]
+    else:
+        # Strip original features; the assigner will set them after binarization/sampling.
+        original_data_list = [
+            Data(edge_index=d.edge_index, y=d.y, num_nodes=d.num_nodes)
+            for d in raw_dataset
+        ]
 
     # 1. Binarize labels if multi-class using optimal partitioning for balance
     if num_classes > 2:
@@ -403,10 +334,10 @@ def preprocess_and_save_original_dataset(
         unique_labels, counts = torch.unique(all_y, return_counts=True)
         counts_list = counts.tolist()
         labels_list = unique_labels.tolist()
-        
+
         total_samples = sum(counts_list)
         target = total_samples // 2
-        
+
         # DP to find subset sum closest to target
         reachable = {0: []}
         for i, count in enumerate(counts_list):
@@ -416,7 +347,7 @@ def preprocess_and_save_original_dataset(
                 if new_s not in reachable:
                     new_reachable[new_s] = indices + [i]
             reachable.update(new_reachable)
-            
+
         best_sum = min(reachable.keys(), key=lambda s: abs(s - target))
         class1_labels = {labels_list[i] for i in reachable[best_sum]}
 
@@ -434,31 +365,27 @@ def preprocess_and_save_original_dataset(
     if max_size is not None and len(original_data_list) > max_size:
         original_data_list = sample_dataset(original_data_list, max_size, rng)
 
-    # 3. Compute and apply features
-    if use_log_bin_deg:
-        # Compute global bin edges from the (binarized and sampled) dataset
-        bin_edges = compute_log_bin_edges(original_data_list)
-        in_dim = len(bin_edges) - 1
-        logger.info(f"Log-binned degree features: {in_dim} bins, edges={bin_edges}")
-        # Apply log-bin features to every graph
-        final_list = []
-        for data in original_data_list:
-            g = pytorch_to_igraph(data)
-            x = apply_log_bin_features(g, bin_edges)
-            edge_index = data.edge_index.clone()
-            y = data.y.clone() if data.y is not None else None
-            final_list.append(Data(x=x, edge_index=edge_index, y=y, num_nodes=data.num_nodes))
-        original_data_list = final_list
+    # 3. Build the feature assigner and apply it to every graph
+    if feature_type == LogBinDegFeatureAssigner.FEATURE_TYPE:
+        assigner: GlobalFeatureAssigner = LogBinDegFeatureAssigner.from_dataset(original_data_list)
+        original_data_list = [assigner.assign_pyg(d) for d in original_data_list]
+    elif feature_type == ConstantFeatureAssigner.FEATURE_TYPE:
+        assigner = ConstantFeatureAssigner()
+        original_data_list = [assigner.assign_pyg(d) for d in original_data_list]
+    elif is_per_graph_strategy(feature_type):
+        # Features are kept from raw_dataset; build a lightweight metadata-only object.
+        sample_x = next((d.x for d in original_data_list if d.x is not None), None)
+        in_dim = sample_x.size(1) if sample_x is not None else 1
+        # Use a minimal dataclass instead of a runtime-generated type.
+        assigner = _PerGraphMetadataSentinel(feature_type=feature_type, in_dim=in_dim)
     else:
-        # Default: dummy (all-ones) features
-        bin_edges = []
-        in_dim = 1
+        raise ValueError(f"Unknown feature_type '{feature_type}'. Supported: {sorted(ALL_FEATURE_TYPES)}.")
 
     from src.graph_analysis import per_graph_statistics, aggregate_statistics
     orig_stats = per_graph_statistics(original_data_list, show_progress=True)
     orig_agg = aggregate_statistics(orig_stats)
+
     # --- Distributional Sampling Data Extraction ---
-    
     if len(orig_stats) > 0:
         _, stat_structure = flatten_stats(orig_stats[0])
     else:
@@ -472,27 +399,23 @@ def preprocess_and_save_original_dataset(
             is_discrete_list.extend([False] * size)
     is_discrete = np.array(is_discrete_list, dtype=bool)
 
-    per_class_stats = {}
+    per_class_stats: dict[int, dict] = {}
     for data, per_graph_stats in zip(original_data_list, orig_stats):
         y_val = int(data.y.item())
-
         if y_val not in per_class_stats:
             per_class_stats[y_val] = {"num_samples": 0, "stat_list": []}
-
         flat_arr, _ = flatten_stats(per_graph_stats)
         per_class_stats[y_val]["num_samples"] += 1
         per_class_stats[y_val]["stat_list"].append(flat_arr)
 
     for y_val in per_class_stats:
         per_class_stats[y_val]["stat_matrix"] = np.vstack(per_class_stats[y_val].pop("stat_list"))
-    
+
     orig_metadata = {
         "source": "original",
         "dataset_name": dataset_name,
         "num_classes": num_classes,
-        "use_log_bin_deg": use_log_bin_deg,
-        "bin_edges": bin_edges,
-        "in_dim": in_dim,
+        **assigner.to_metadata(),
         "per_graph_statistics": orig_stats,
         "aggregate_statistics": orig_agg,
         "is_discrete": is_discrete,
@@ -504,36 +427,42 @@ def preprocess_and_save_original_dataset(
         dataset_list=original_data_list,
         output_dir=orig_pt_path.parent,
         filename=orig_pt_path.name,
-        extra_metadata=orig_metadata
+        extra_metadata=orig_metadata,
     )
 
     return original_data_list, orig_metadata
 
 
-def load_all_synthetic_variants(synth_dir: Path, dataset_name: str) -> list[Path]:
+def load_all_synthetic_variants(synth_dir: Path, dataset_name: str, method: str, sampler: str | None = None, feature: str = "log_bin_deg") -> list[Path]:
     """Scans the directory and returns paths to all synthetic variant datasets.
 
+    Files are expected to follow the naming convention::
+        {dataset_name}_{method}_{sampler}_{feature}_v{v}.pt
+
     Args:
-        synth_dir: Directory containing the `.pt` files.
-        dataset_name: Name of the original dataset.
+        synth_dir: Directory containing the ``.pt`` files (flat, no sub-folders).
+        dataset_name: Name of the original dataset (e.g. ``'BZR'``).
+        method: Generation method (e.g. ``'padma'``).
+        sampler: Distribution sampler name, or ``None`` (mapped to ``'nosampler'``).
+        feature: Node feature strategy (e.g. ``'log_bin_deg'``).
     Returns:
-        A list of paths to `.pt` files.
+        A list of paths to ``.pt`` files sorted by variant index.
     """
+    sampler_tag = sampler if sampler is not None else "nosampler"
+    prefix = f"{dataset_name}_{method}_{sampler_tag}_{feature}_v"
+
     variants: list[Path] = []
-    
-    # Iteratively find sequential .pt files (v0, v1, ...) until not found
     v = 0
     while True:
-        pt_path = synth_dir / f"{dataset_name}_synth_v{v}.pt"
+        pt_path = synth_dir / f"{prefix}{v}.pt"
         if not pt_path.exists():
             break
-
         variants.append(pt_path)
         v += 1
-        
+
     if v == 0:
-        logger.warning(f"No synthetic variant files found in {synth_dir}")
-        
+        logger.warning(f"No synthetic variant files found in {synth_dir} (prefix='{prefix}*')")
+
     return variants
 
 
@@ -606,46 +535,41 @@ def pytorch_to_igraph(data: Data) -> ig.Graph:
     return g
 
 
-def igraph_to_pytorch(g: ig.Graph, y: torch.Tensor, bin_edges: list[float] | None = None) -> Data:
+def igraph_to_pytorch(g: ig.Graph, y: torch.Tensor, assigner: NodeFeatureAssigner | None = None, bin_edges: list[float] | None = None) -> Data:
     """Converts an igraph Graph back to a PyG Data object.
 
     Args:
         g: The igraph Graph.
         y: Target label for the graph.
-        bin_edges: Optional bin boundaries from :func:`compute_log_bin_edges`.  When
-            provided, node features are one-hot log-binned degree vectors instead of
-            the default all-ones vector.
+        assigner: A :class:`~src.node_features.NodeFeatureAssigner` instance that
+            controls node feature assignment.  When *None* and ``bin_edges`` is also
+            *None*, all-ones dummy features are used.
+        bin_edges: **Deprecated** — pass a :class:`LogBinDegFeatureAssigner` via
+            ``assigner`` instead.  When provided without ``assigner``, a temporary
+            :class:`LogBinDegFeatureAssigner` is constructed from ``bin_edges``.
     Returns:
         A PyG Data object.
     """
-    num_nodes = g.vcount()
-    edge_list = g.get_edgelist()
-
-    if not edge_list:
-        edge_index = torch.empty((2, 0), dtype=torch.long)
-    else:
-        edge_index = torch.tensor(edge_list, dtype=torch.long).t().contiguous()
-        # Pytorch Geometric undirected graphs require both [u, v] and [v, u]
-        edge_index = to_undirected(edge_index, num_nodes=num_nodes)
-
-    if bin_edges:
-        x = apply_log_bin_features(g, bin_edges)
-    else:
-        x = torch.ones((num_nodes, 1), dtype=torch.float32)
-    return Data(x=x, edge_index=edge_index, y=y, num_nodes=num_nodes)
+    if assigner is None:
+        if bin_edges:
+            assigner = LogBinDegFeatureAssigner(bin_edges)
+        else:
+            assigner = ConstantFeatureAssigner()
+    return assigner.assign_igraph(g, y)
 
 
-def networkx_to_pytorch(nx_graph: nx.Graph, y: torch.Tensor, bin_edges: list[float] | None = None) -> Data:
+def networkx_to_pytorch(nx_graph: nx.Graph, y: torch.Tensor, assigner: NodeFeatureAssigner | None = None, bin_edges: list[float] | None = None) -> Data:
     """Converts a NetworkX graph directly to a PyG Data object.
 
     Args:
         nx_graph: The source NetworkX graph.
         y: Target label for the graph.
-        bin_edges: Optional bin boundaries forwarded to :func:`igraph_to_pytorch`.
+        assigner: A :class:`~src.node_features.NodeFeatureAssigner` forwarded to :func:`igraph_to_pytorch`.
+        bin_edges: **Deprecated** — use ``assigner`` instead.
     Returns:
         A PyG Data object.
     """
-    return igraph_to_pytorch(networkx_to_igraph(nx_graph), y, bin_edges=bin_edges)
+    return igraph_to_pytorch(networkx_to_igraph(nx_graph), y, assigner=assigner, bin_edges=bin_edges)
 
 
 def pytorch_to_networkx(data: Data) -> nx.Graph:

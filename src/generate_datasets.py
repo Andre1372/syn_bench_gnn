@@ -23,10 +23,14 @@ from src.data_utils import (
     igraph_to_networkx,
     pytorch_to_igraph,
     save_synthetic_dataset,
-    remove_features,
-    compute_log_bin_edges,
-    apply_log_bin_features,
     unflatten_stats,
+)
+from src.node_features import (
+    NodeFeatureAssigner,
+    node_feature_assigner_from_metadata,
+    is_per_graph_strategy,
+    PER_GRAPH_ASSIGNERS,
+    sort_source_x_by_neighbor_degree,
 )
 from src.graph_analysis import per_graph_statistics, aggregate_statistics
 from src.enc_dec_dataset import FeatureEncoderDecoder, KNOWN_SAMPLERS
@@ -180,7 +184,7 @@ def generate_graph(target_stats: dict[str, Any], method: str, rng: np.random.Gen
 # Task-building helpers
 # ---------------------------------------------------------------------------
 
-def _build_tasks_direct(dataset_obj: "DatasetPT", method: str, num_variants: int, all_seeds: list[list[int]]) -> list[dict]:
+def _build_tasks_direct(dataset_obj: "DatasetPT", method: str, num_variants: int, all_seeds: list[list[int]], include_source_features: bool = False, feature_type: str = "random_sample") -> list[dict]:
     """Builds per-graph tasks using the original (per-graph) statistics.
 
     Args:
@@ -188,6 +192,8 @@ def _build_tasks_direct(dataset_obj: "DatasetPT", method: str, num_variants: int
         method: Generation method name.
         num_variants: Number of synthetic variants.
         all_seeds: Pre-generated seeds, shape (n_graphs, num_variants).
+        include_source_features: If True, store ``data.x`` in the task dict under ``'source_x'`` for per-graph feature transplanting.
+        feature_type: The type of feature assignment.
     Returns:
         List of task dicts, one per graph.
     """
@@ -197,12 +203,31 @@ def _build_tasks_direct(dataset_obj: "DatasetPT", method: str, num_variants: int
         data = dataset_obj[i]
         target_stats = get_target_stats(dataset_obj, i)
         obs_nx = igraph_to_networkx(pytorch_to_igraph(data)) if needs_obs_nx else None
+        
+        source_x = data.x
+        if include_source_features and source_x is not None:
+            # Sort source features by the strategy's composite key before storing.
+            # _build_tasks_direct is only called when is_per_graph is True, so
+            # feature_type is guaranteed to be in PER_GRAPH_ASSIGNERS.
+            if feature_type == "degree_ordered":
+                if data.edge_index is not None and data.edge_index.numel() > 0:
+                    degrees = torch.zeros(data.num_nodes, dtype=torch.long)
+                    degrees.scatter_add_(0, data.edge_index[0], torch.ones(data.edge_index.size(1), dtype=torch.long))
+                else:
+                    degrees = torch.zeros(data.num_nodes, dtype=torch.long)
+                sorted_indices = torch.argsort(degrees, descending=True, stable=True)
+                source_x = source_x.float()[sorted_indices]
+            elif feature_type == "neighbor_degree_ordered":
+                source_x = sort_source_x_by_neighbor_degree(data)
+            # random_sample: no pre-sorting needed
+
         tasks.append({
             "i": i,
             "target_stats": [target_stats] * num_variants,
             "y": data.y,
             "obs_nx": obs_nx,
             "seeds": all_seeds[i],
+            "source_x": source_x if include_source_features else None,
         })
     return tasks
 
@@ -258,8 +283,20 @@ def _build_tasks_distributional(dataset_obj: DatasetPT, metadata: dict[str, Any]
     return tasks
 
 
-def _accumulate_result(result: tuple, method: str, num_variants: int, variant_datasets: list[list], variant_seeds: list[list], variant_infos: list[list], y: torch.Tensor) -> None:
+def _accumulate_result(
+    result: tuple,
+    method: str,
+    num_variants: int,
+    variant_datasets: list[list],
+    variant_seeds: list[list],
+    variant_infos: list[list],
+    y: torch.Tensor,
+    assigner: NodeFeatureAssigner,
+    source_x: torch.Tensor | None = None,
+    feature_type: str = "constant",
+) -> None:
     """Merges a single worker result into the per-variant accumulators.
+
     Args:
         result: Tuple (graph_idx, graphs, seeds, errors, infos) from a worker.
         method: Generation method (used for logging).
@@ -268,6 +305,9 @@ def _accumulate_result(result: tuple, method: str, num_variants: int, variant_da
         variant_seeds: Accumulator list indexed by variant.
         variant_infos: Accumulator list indexed by variant.
         y: Target label for the graph.
+        assigner: Feature assigner used to build PyG Data from igraph graphs.
+        source_x: If provided, a per-graph feature assigner is built from this tensor; overrides *assigner*.
+        feature_type: The type of feature strategy (used to select the correct assigner).
     """
     i, graphs, seeds, errors, infos = result
     for variant_idx, exc_msg in errors:
@@ -276,8 +316,13 @@ def _accumulate_result(result: tuple, method: str, num_variants: int, variant_da
         ig_g = graphs[v]
         if ig_g is None:
             pyg_data = Data(x=torch.ones((1, 1)), edge_index=torch.empty((2, 0), dtype=torch.long), y=y, num_nodes=1)
+        elif source_x is not None:
+            # Build the per-graph assigner from the registry — no if-else needed.
+            assigner_cls = PER_GRAPH_ASSIGNERS[feature_type]
+            per_graph_assigner = assigner_cls(source_x)
+            pyg_data = igraph_to_pytorch(ig_g, y, assigner=per_graph_assigner)
         else:
-            pyg_data = igraph_to_pytorch(ig_g, y)
+            pyg_data = igraph_to_pytorch(ig_g, y, assigner=assigner)
         variant_datasets[v].append(pyg_data)
         variant_seeds[v].append(seeds[v])
         variant_infos[v].append(infos[v])
@@ -296,6 +341,7 @@ def generate_synthetic_variants(
     output_dir: Path,
     num_workers: int,
     distribution_sampler: str | None = None,
+    feature_type: str | None = None,
 ) -> None:
     """Generates ``num_variants`` synthetic variants for a dataset and saves them to disk.
 
@@ -303,6 +349,9 @@ def generate_synthetic_variants(
     generation method for each of the ``num_variants`` independent variants.
     Results are accumulated in-memory, then written to ``output_dir`` as ``.pt``
     files via :func:`~src.data_utils.save_synthetic_dataset`.
+
+    The output file name follows the pattern::
+        {dataset_name}_{method}_{sampler}_{feature}_v{v}.pt
 
     Args:
         dataset_name: Name of the TUDataset (e.g. ``"PROTEINS"``).
@@ -316,6 +365,8 @@ def generate_synthetic_variants(
         distribution_sampler: Name of the encoder-decoder to use for distributional
             sampling (one of ``'gmcm'``, ``'moments'``, ``'percentile'``). If ``None``,
             per-graph statistics are replicated directly without sampling.
+        feature_type: Node feature strategy override. If ``None``, the value is read
+            from the preprocessed dataset metadata.
 
     Raises:
         ValueError: If ``method`` or ``distribution_sampler`` is not recognised, or if
@@ -334,10 +385,20 @@ def generate_synthetic_variants(
 
     dataset_obj = DatasetPT(orig_pt_path)
     ds_metadata = dataset_obj.metadata
+    # Use the explicitly passed feature_type if provided; fall back to metadata.
+    effective_feature_type: str = feature_type if feature_type is not None else ds_metadata.get("feature_type", "constant")
 
-    use_log_bin_deg: bool = ds_metadata.get("use_log_bin_deg", False)
-    if use_log_bin_deg:
-        logger.info(f"Log-binned degree features enabled for {dataset_name}: bin edges will be recomputed per-variant after generation.")
+    if is_per_graph_strategy(effective_feature_type) and distribution_sampler is not None:
+        raise ValueError(f"'{effective_feature_type}' features are per-graph and incompatible with distribution_sampler.")
+
+    # For per-graph strategies, features are transplanted during accumulation.
+    is_per_graph = is_per_graph_strategy(effective_feature_type)
+    if is_per_graph:
+        assigner = None
+        logger.info(f"Feature strategy for {dataset_name}: {effective_feature_type} (per-graph transplanting).")
+    else:
+        assigner = node_feature_assigner_from_metadata(ds_metadata)
+        logger.info(f"Feature assigner for {dataset_name}: {assigner.__class__.__name__} (in_dim={assigner.in_dim})")
 
     # Pre-generate one seed per (graph, variant) pair for full reproducibility.
     all_seeds: list[list[int]] = [
@@ -352,7 +413,7 @@ def generate_synthetic_variants(
         encoder = KNOWN_SAMPLERS[distribution_sampler](num_classes=ds_metadata["num_classes"], is_discrete=is_discrete, rng=rng)
         tasks = _build_tasks_distributional(dataset_obj, ds_metadata, num_variants, all_seeds, encoder)
     else:
-        tasks = _build_tasks_direct(dataset_obj, method, num_variants, all_seeds)
+        tasks = _build_tasks_direct(dataset_obj, method, num_variants, all_seeds, include_source_features=is_per_graph, feature_type=effective_feature_type)
 
     # Accumulators indexed by variant index.
     variant_datasets: list[list[Data]] = [[] for _ in range(num_variants)]
@@ -369,12 +430,12 @@ def generate_synthetic_variants(
         results.sort(key=lambda r: r[0])
         for result in results:
             task_i = tasks[result[0]]
-            _accumulate_result(result, method, num_variants, variant_datasets, variant_seeds, variant_infos, task_i["y"])
+            _accumulate_result(result, method, num_variants, variant_datasets, variant_seeds, variant_infos, task_i["y"], assigner, source_x=task_i.get("source_x"), feature_type=effective_feature_type)
     else:
         with logging_redirect_tqdm():
             for task in tqdm(tasks, desc=f"Phase A [{dataset_name}/{method}]"):
                 result = worker_func(task)
-                _accumulate_result(result, method, num_variants, variant_datasets, variant_seeds, variant_infos, task["y"])
+                _accumulate_result(result, method, num_variants, variant_datasets, variant_seeds, variant_infos, task["y"], assigner, source_x=task.get("source_x"), feature_type=effective_feature_type)
 
     # Extract target statistics for each variant before saving
     variant_target_stats: list[list[dict]] = [[] for _ in range(num_variants)]
@@ -383,22 +444,22 @@ def generate_synthetic_variants(
             variant_target_stats[v].append(task["target_stats"][v])
 
     # Persist each variant to disk
+    sampler_tag = distribution_sampler if distribution_sampler is not None else "nosampler"
     for v, (graphs, seeds, infos) in enumerate(zip(variant_datasets, variant_seeds, variant_infos)):
-        filename = f"{dataset_name}_synth_v{v}.pt"
+        filename = f"{dataset_name}_{method}_{sampler_tag}_{effective_feature_type}_v{v}.pt"
 
-        if use_log_bin_deg:
-            variant_bin_edges = compute_log_bin_edges(graphs)
-            variant_in_dim = len(variant_bin_edges) - 1
-            logger.info(f"Variant {v}: recomputed {variant_in_dim} bins from {len(graphs)} synthetic graphs.")
-            graphs = [Data(
-                    x=apply_log_bin_features(pytorch_to_igraph(data), variant_bin_edges),
-                    edge_index=data.edge_index,
-                    y=data.y,
-                    num_nodes=data.num_nodes,
-                ) for data in graphs]
+        # For log-binned features, recompute bin edges from the generated graphs so the encoding is consistent with the variant's own degree distribution.
+        from src.node_features import LogBinDegFeatureAssigner
+        if is_per_graph:
+            # Features already transplanted per-graph; just record the metadata.
+            variant_feature_meta = {"feature_type": effective_feature_type, "in_dim": ds_metadata.get("in_dim", 1)}
+        elif isinstance(assigner, LogBinDegFeatureAssigner):
+            variant_assigner = LogBinDegFeatureAssigner.from_dataset(graphs)
+            logger.info(f"Variant {v}: recomputed {variant_assigner.in_dim} bins from {len(graphs)} synthetic graphs.")
+            graphs = [variant_assigner.assign_pyg(data) for data in graphs]
+            variant_feature_meta = variant_assigner.to_metadata()
         else:
-            variant_bin_edges = []
-            variant_in_dim = 1
+            variant_feature_meta = assigner.to_metadata()
 
         # Map generator-specific keys to standardised topology metric keys.
         precomputed_stats = [
@@ -414,9 +475,7 @@ def generate_synthetic_variants(
             "variant_idx": v,
             "num_variants": num_variants,
             "seeds": seeds,
-            "use_log_bin_deg": use_log_bin_deg,
-            "bin_edges": variant_bin_edges,
-            "in_dim": variant_in_dim,
+            **variant_feature_meta,
             "distribution_sampler": distribution_sampler,
             "per_graph_target_statistics": variant_target_stats[v],
             "per_graph_statistics": synth_stats,
