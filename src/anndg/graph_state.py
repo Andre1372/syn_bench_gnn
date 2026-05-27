@@ -219,7 +219,11 @@ class GraphState:
         if self._num_nodes == 0: return np.zeros(self._bins, dtype=float)
         if self._num_active_nodes <= 1: return np.zeros(self._bins, dtype=float)
         
-        eccentricities = self.get_graph().eccentricity()
+        dists = np.array(self.get_graph().distances(), dtype=float)
+        # Mask out infinity (unreachable paths) by replacing them with -1.0
+        finite_dists = np.where(np.isinf(dists), -1.0, dists)
+        eccentricities = np.max(finite_dists, axis=1)
+
         ecc_raw = np.array(eccentricities, dtype=float)
         norm_factor = (self._num_nodes - 1)
 

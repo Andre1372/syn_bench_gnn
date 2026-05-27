@@ -74,7 +74,6 @@ def _canonical_order(values, order):
     present = set(values)
     return [v for v in order if v in present] + sorted(v for v in present if v not in order)
 
-
 def load_experiment_data() -> pd.DataFrame:
     """Loads and preprocesses main GNN evaluation data."""
     sampler_alts = "|".join(re.escape(s) for s in SAMPLER_ORDER)
@@ -128,9 +127,9 @@ df_raw = load_experiment_data()
 # Derived globals
 MODELS = sorted(df_raw["model"].unique().tolist())
 DATASETS = [d for d in DATASET_NAMES if d in df_raw["dataset"].unique()]
-
 _filtered_src = df_raw[df_raw["source_base"] != "original"].sort_values("source_base")
 METHODS_PER_DATASET = _filtered_src.groupby("dataset", observed=True)["source_base"].unique().apply(list).to_dict()
+
 
 
 # Cell 2 - Utilities functions
