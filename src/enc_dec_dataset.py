@@ -121,19 +121,19 @@ class FeatureEncoderDecoder(ABC):
     # After encode_features removes col-1 (n_edges), the 13 internal columns are:
     # (min, max) per internal column; None = unbounded on that side.
     _FEATURE_BOUNDS: Final[dict[int, tuple[float | None, float | None]]] = {
-        0:  (1.0,  None),   # n_nodes              >= 1
-        1:  (0.0,  1.0),    # degree_mean          in [0, 1]
-        2:  (0.0,  0.25),   # degree_var           in [0, 0.25]
-        3:  (None, None),   # degree_skew          unbounded
-        4:  (1.0,  None),   # degree_kurt (Pearson) >= 1
-        5:  (0.0,  1.0),    # annd_bin_0           in [0, 1]
-        6:  (0.0,  1.0),    # annd_bin_1           in [0, 1]
-        7:  (0.0,  1.0),    # annd_bin_2           in [0, 1]
-        8:  (0.0,  1.0),    # annd_bin_3           in [0, 1]
-        9:  (0.0,  1.0),    # eccentricity_bin_0   in [0, 1]
-        10: (0.0,  1.0),    # eccentricity_bin_1   in [0, 1]
-        11: (0.0,  1.0),    # eccentricity_bin_2   in [0, 1]
-        12: (0.0,  1.0),    # eccentricity_bin_3   in [0, 1]
+        0:  (1.0,  None),   # n_nodes                    >= 1
+        1:  (0.0,  None),   # avg_degree (unnormalised)  >= 0 (no upper bound)
+        2:  (0.0,  None),   # degree_var (unnormalised)  >= 0 (no upper bound)
+        3:  (None, None),   # degree_skew                unbounded
+        4:  (None, None),   # degree_kurt (Pearson)      empirically unbounded for small samples
+        5:  (0.0,  1.0),    # annd_bin_0                 in [0, 1]
+        6:  (0.0,  1.0),    # annd_bin_1                 in [0, 1]
+        7:  (0.0,  1.0),    # annd_bin_2                 in [0, 1]
+        8:  (0.0,  1.0),    # annd_bin_3                 in [0, 1]
+        9:  (0.0,  1.0),    # eccentricity_bin_0         in [0, 1]
+        10: (0.0,  1.0),    # eccentricity_bin_1         in [0, 1]
+        11: (0.0,  1.0),    # eccentricity_bin_2         in [0, 1]
+        12: (0.0,  1.0),    # eccentricity_bin_3         in [0, 1]
     }
     def _check_percentile_matrix(self, enc: np.ndarray) -> bool:
         """Validates a (num_percentiles, num_features) percentile matrix.

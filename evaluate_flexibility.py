@@ -88,7 +88,7 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument(
         "--num_workers",
         type=int,
-        default=max(1, int(mp.cpu_count() * 0.9)),
+        default=max(1, int(mp.cpu_count() * 0.5)),
         help="Number of worker processes for parallel generation (Phase A).",
     )
     return parser.parse_args()
@@ -108,9 +108,63 @@ def _write_csv(rows: list[dict], path: Path) -> None:
         writer.writerows(rows)
 
 
+def _append_csv(rows: list[dict], path: Path) -> None:
+    """Appends rows to an existing CSV, or creates it if absent."""
+    if not rows:
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if not path.exists():
+        _write_csv(rows, path)
+        return
+    with path.open("a", newline="", encoding="utf-8") as fh:
+        writer = csv.DictWriter(fh, fieldnames=list(rows[0].keys()))
+        writer.writerows(rows)
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+# Ordered names that mirror TARGETED_FEATURES used in the analysis notebooks.
+_VECTOR_STAT_KEYS: list[tuple[str, str, int]] = [
+    # (agg_stats key,  csv column prefix,  expected length)
+    ("degree_moments", "degree_moments", 4),
+    ("annd",           "annd",           4),
+    ("eccentricity",   "eccentricity",   4),
+]
+
+
+def _add_targeted_stats_to_row(row: dict, agg_stats: dict) -> None:
+    """Adds the 14 targeted graph statistics as flat ``<name>_mean`` columns.
+
+    Handles both the case where ``agg_stats`` is a fully-populated dict (Phase A
+    and Phase C) and the case where it is an empty dict / ``None`` (Phase B,
+    where no real graphs exist).  Missing or ``None`` values are written as
+    ``None`` so that the CSV column is present but empty.
+
+    Vector statistics (``degree_moments``, ``annd``, ``eccentricity``) are
+    expanded element-wise into columns ``<prefix>_0`` … ``<prefix>_{n-1}``.
+
+    Args:
+        row: The CSV row dict to mutate in place.
+        agg_stats: The aggregate_statistics dict returned by
+            :func:`src.graph_analysis.aggregate_statistics`, or an empty dict.
+    """
+    # Scalar targeted stat
+    row["n_edges_mean"] = agg_stats.get("n_edges", None) if agg_stats else None
+
+    # Vector targeted stats
+    for agg_key, col_prefix, length in _VECTOR_STAT_KEYS:
+        vec = agg_stats.get(agg_key, None) if agg_stats else None
+        for i in range(length):
+            col = f"{col_prefix}_{i}_mean"
+            if vec is not None:
+                try:
+                    row[col] = float(vec[i])
+                except (IndexError, TypeError):
+                    row[col] = None
+            else:
+                row[col] = None
 
 def extract_dataset_stats_emb(dataset_name: str, num_graphs: int, orig_metadata: dict, sampler_name: str, rng: np.random.Generator,) -> dict:
     """Computes the embedding for the complete dataset (ignoring classes) and returns the row with embedding and non-targeted metrics."""
@@ -147,135 +201,241 @@ def extract_dataset_stats_emb(dataset_name: str, num_graphs: int, orig_metadata:
     for idx, val in enumerate(dataset_embedding):
         row[f"emb_{idx}"] = val
         
+    # Add targeted stats (n_edges + vector stats)
+    _add_targeted_stats_to_row(row, agg_stats)
+
     # Add non-targeted metrics
     row["modularity_mean"] = agg_stats.get("modularity", 0.0)
     row["clustering_mean"] = agg_stats.get("clustering", 0.0)
     row["assortativity_mean"] = agg_stats.get("assortativity", 0.0)
     row["efficiency_mean"] = agg_stats.get("efficiency", 0.0)
     row["diameter_mean"] = agg_stats.get("diameter", 0.0)
-    
+
     return row
 
 
-def generate_target_statistics(stats_rows: list[dict[str, str | int | float | None]], num_synth_datasets: int, sampler_name: str, rng: np.random.Generator,) -> list[dict[str, str | int | float | None]]:
-    """Generates target statistics vectors using asymmetric parent selection, directional
-    interpolation/extrapolation, per-dimension Gaussian noise, and semantic+topological validation.
+def _get_enc_block_size(encoder) -> int:
+    """Returns the number of scalar values in the ``_encodings`` block of *encoder*.
 
-    The four phases are:
-    1. Asymmetric Parent Selection: Parent A is sampled uniformly; Parent B is sampled
-       proportionally to average node count to pull targets towards larger, structured graphs.
-    2. Directional Interpolation / Extrapolation along the A→B vector:
-       - 50 % of the time: uniform interpolation in [0, 1] (midpoint exploration).
-       - 50 % of the time: exponential-decay extrapolation beyond the A–B segment,
-         with equal probability of going below A (t<0) or above B (t>1).
-    3. Dimensional Perturbation: Independent zero-mean Gaussian noise added to every
-       dimension, with std = 10 % of the absolute coordinate distance |val_b - val_a|.
-    4. Dual Validation:
-       - Semantic: ``encoder.load_embedding`` verifies that sampler-level invariants
-         (non-negative variance, monotone percentiles, etc.) are satisfied.
-       - Topological (O(1)): inspects ``encoder._encodings[0]`` directly to estimate
-         the maximum reachable n_nodes and avg_degree. Embeddings that could produce
-         graphs with more than 500 nodes or more than 1000 edges are discarded.
+    For percentile / GMCM encoders this is ``num_percentiles × num_features``;
+    for the moments encoder it is ``k × num_features``.
+    """
+    num_features = encoder._is_discrete.size
+    if hasattr(encoder, "percentile_size"):
+        q = np.arange(0, 1 + encoder.percentile_size / 2, encoder.percentile_size)
+        q[q > 1.0] = 1.0
+        if q[-1] < 1.0:
+            q = np.append(q, 1.0)
+        return len(q) * num_features
+    elif hasattr(encoder, "k"):
+        return encoder.k * num_features
+    raise ValueError(f"Cannot determine encoding block size for {type(encoder).__name__}.")
+
+
+def intelligent_perturbing(
+    embedding: np.ndarray,
+    enc_size: int,
+    enc_rows: int,
+    sampler_name: str,
+    rng: np.random.Generator,
+    noise_std_frac: float = 0.05,
+    shift_frac: float = 0.05,
+    var_frac: float = 0.10,
+) -> np.ndarray:
+    """Perturbs only the ``_encodings`` block of a flat embedding vector.
+
+    The ``_encodings`` block occupies the first ``enc_size`` elements of
+    *embedding*.  The remainder (GMM weights/means/covariances for GMCM,
+    correlation matrix for ``percentile_corr``) is returned **unchanged**.
+
+    Perturbation strategy:
+
+    * **moments** sampler — each scalar in the block is independently
+      shifted by zero-mean Gaussian noise whose std equals
+      ``noise_std_frac × |value|`` (with a small absolute floor).
+    * **percentile / percentile_corr / gmcm** samplers — the block is
+      a ``(num_percentiles, num_features)`` matrix of monotone columns.
+      For each feature column two scalars are drawn:
+      - ``shift`` ~ Uniform(−shift_frac·span, +shift_frac·span) translates the whole column.
+      - ``scale`` ~ Uniform(1−var_frac, 1+var_frac) expands/compact the column around its median value.
 
     Args:
-        stats_rows: A list of dictionaries containing mean statistics of original datasets.
-        num_synth_datasets: The number of target statistics vectors to generate.
-        sampler_name: The name of the sampler being evaluated to enforce its semantic bounds.
-        rng: The numpy random generator used to ensure reproducible generation.
+        embedding:       Flat 1-D embedding vector as stored in the CSV.
+        enc_size:        Number of scalar values belonging to ``_encodings``.
+        enc_rows:        Number of rows in the encoding matrix (``k`` for moments, ``num_percentiles`` for percentile/GMCM).
+        sampler_name:    One of ``"moments"``, ``"percentile"``, ``"percentile_corr"``, ``"gmcm"``.
+        rng:             NumPy random generator.
+        noise_std_frac:  Fraction of |value| used as noise std (moments).
+        shift_frac:      Fraction of column span used as shift range (percentile-based samplers).
+        var_frac:        Maximum fractional change in column spread (percentile-based samplers).
     Returns:
-        A list of dictionaries representing the generated target dataset statistics/embeddings.
+        New flat embedding with the ``_encodings`` block perturbed and the rest of the vector unchanged.
     """
+    result = embedding.copy()
+    enc_flat = embedding[:enc_size].copy()
+    num_features = enc_size // enc_rows
+    enc_mat = enc_flat.reshape(enc_rows, num_features)
+
+    if sampler_name == "moments":
+        # Independent Gaussian noise on every scalar.
+        noise = rng.normal(0.0, np.maximum(noise_std_frac * np.abs(enc_mat), 1e-6))
+        enc_mat = enc_mat + noise
+    else:
+        # Percentile-based samplers: shift + scale per feature column.
+        for col in range(num_features):
+            column = enc_mat[:, col]
+            span = column[-1] - column[0]
+            median_val = np.median(column)
+            shift = rng.uniform(-shift_frac * max(abs(span), 1e-6), shift_frac * max(abs(span), 1e-6))
+            scale = rng.uniform(1.0 - var_frac, 1.0 + var_frac)
+            enc_mat[:, col] = median_val + scale * (column - median_val) + shift
+
+    result[:enc_size] = enc_mat.flatten()
+    return result
+
+def _check_topo(encoder, sampler_name: str) -> bool:
+    """Verifies that the encoder's learned feature distributions do not exceed
+    topological thresholds (max nodes <= 500 and max edges <= 1000).
+    """
+    enc = encoder._encodings[0]
+    if enc is None:
+        return False
+
+    if sampler_name == "moments":
+        mu_nodes  = float(enc[0, 0])
+        mu_degree = float(enc[0, 1])
+        s_nodes   = float(np.sqrt(max(enc[1, 0], 0.0))) if enc.shape[0] >= 2 else 0.0
+        s_degree  = float(np.sqrt(max(enc[1, 1], 0.0))) if enc.shape[0] >= 2 else 0.0
+        max_nodes  = mu_nodes  + 3.0 * s_nodes
+        max_degree = mu_degree + 3.0 * s_degree
+    else:
+        max_nodes  = float(enc[-1, 0])
+        max_degree = float(enc[-1, 1])
+
+    max_edges = (max_nodes * max_degree) / 2.0
+    return max_nodes <= 500 and max_edges <= 1000
+
+def generate_target_statistics(stats_rows: list[dict[str, str | int | float | None]], num_synth_datasets: int, sampler_name: str, rng: np.random.Generator,) -> list[dict[str, str | int | float | None]]:
+    """Generates target statistics in two phases.
+
+    **Phase 1 — Per-original perturbation (5 variants each):**
+    For each row in *stats_rows*, ``intelligent_perturbing`` is applied 5 times
+    to produce variants that stay close to the original distributions.  Only the
+    ``_encodings`` block is perturbed; the GMM or correlation-matrix tail of the
+    embedding is kept **unchanged**.
+
+    **Phase 2 — Two-parent interpolation/extrapolation:**
+    After Phase 1, the remaining slots up to *num_synth_datasets* are filled by
+    the original asymmetric parent-selection strategy:
+
+    1. Parent A is sampled uniformly; Parent B is sampled proportionally to
+       node count (larger graphs are preferred as the B anchor).
+    2. Directional interpolation (50 %) in [0, 1] or extrapolation (50 %) with
+       exponential decay beyond the A–B segment.
+    3. The resulting embedding is perturbed using ``intelligent_perturbing`` to
+       only explore feature variations while keeping copula correlations/GMM parameters intact.
+    4. Dual validation: semantic (``load_embedding``) + topological (O(1)).
+
+    Args:
+        stats_rows: List of dicts with original dataset mean statistics (must contain ``emb_*`` columns).
+        num_synth_datasets: Total number of target rows to generate.
+        sampler_name: Name of the sampler (``"gmcm"``, ``"moments"``, etc.).
+        rng: NumPy random generator.
+    Returns:
+        List of dicts representing the generated target statistics/embeddings.
+    """
+    _PERTURB_PER_ORIG = 0   # fixed number of per-original variants in Phase 1
+
     logger = logging.getLogger(__name__)
     targeted_features = [k for k in stats_rows[0].keys() if k.startswith("emb_")]
     non_targeted_features = ["modularity_mean", "clustering_mean", "assortativity_mean", "efficiency_mean", "diameter_mean"]
 
-    # Convert original statistics to a fast numpy matrix for vectorized math
     features_matrix = np.array([[row[feat] for feat in targeted_features] for row in stats_rows], dtype=np.float64)
-    num_graphs = np.array([row["Num_Graphs"] for row in stats_rows], dtype=np.int64)
-    node_counts = np.array([row["n_nodes_mean"] for row in stats_rows], dtype=np.float64)
-
-    # Asymmetric Sampling probabilities for Parent B
-    prob_b = node_counts / np.sum(node_counts)
-
-    # Initialize the encoder to validate the generated target embeddings
-    is_discrete = np.array([True, True] + [False] * 12)
-    encoder = KNOWN_SAMPLERS[sampler_name](num_classes=1, is_discrete=is_discrete, rng=rng)
-
+    num_graphs      = np.array([row["Num_Graphs"] for row in stats_rows], dtype=np.int64)
+    node_counts     = np.array([row["n_nodes_mean"] for row in stats_rows], dtype=np.float64)
     mean_num_graphs = int(np.mean(num_graphs))
-    target_rows = []
-    
+
+    # Shared encoder infrastructure.
+    is_discrete = np.array([True, True] + [False] * 12)
+    _probe   = KNOWN_SAMPLERS[sampler_name](num_classes=1, is_discrete=is_discrete, rng=rng)
+    enc_size = _get_enc_block_size(_probe)
+    enc_rows = enc_size // _probe._is_discrete.size  # num_percentiles or k
+    encoder  = KNOWN_SAMPLERS[sampler_name](num_classes=1, is_discrete=is_discrete, rng=rng)
+
+    target_rows: list[dict] = []
     target_idx = 0
-    attempts = 0
-    max_attempts = num_synth_datasets * 100
-    
+
+    # ── PHASE 1: Per-original intelligent perturbation ─────────────────────────
+    for orig_idx, orig_row in enumerate(stats_rows):
+        base_emb     = np.array([orig_row[feat] for feat in targeted_features], dtype=np.float64)
+        orig_n_nodes = float(node_counts[orig_idx])
+
+        accepted  = 0
+        attempts  = 0
+        max_att_p1 = _PERTURB_PER_ORIG * 50
+
+        while accepted < _PERTURB_PER_ORIG and attempts < max_att_p1:
+            attempts += 1
+
+            candidate = intelligent_perturbing(base_emb, enc_size, enc_rows, sampler_name, rng)
+
+            if not encoder.load_embedding(candidate, class_id=0):
+                continue
+
+            if not _check_topo(encoder, sampler_name):
+                continue
+
+            target_row = {
+                "Dataset": f"target_{target_idx}",
+                "Num_Graphs": mean_num_graphs,
+                "n_nodes_mean": orig_n_nodes,
+            }
+            for j, feat in enumerate(targeted_features):
+                target_row[feat] = float(candidate[j])
+            _add_targeted_stats_to_row(target_row, {})
+            for feat in non_targeted_features:
+                target_row[feat] = None
+
+            target_rows.append(target_row)
+            target_idx += 1
+            accepted += 1
+
+        if accepted < _PERTURB_PER_ORIG:
+            logger.warning(f"Phase 1: only {accepted}/{_PERTURB_PER_ORIG} variants for '{orig_row.get('Dataset')}' after {attempts} attempts.")
+
+    # ── PHASE 2: Two-parent interpolation/extrapolation ────────────────────────
+    prob_b       = node_counts / np.sum(node_counts)
+    remaining    = num_synth_datasets - len(target_rows)
+    max_attempts = remaining * 100
+    attempts     = 0
+
     while len(target_rows) < num_synth_datasets and attempts < max_attempts:
         attempts += 1
-        
-        # Phase 1: Asymmetric Parent Selection
-        # A is chosen uniformly; B is size-weighted to pull toward larger graphs.
+
         idx_a = rng.choice(len(stats_rows))
         idx_b = rng.choice(len(stats_rows), p=prob_b)
-
         val_a = features_matrix[idx_a]
         val_b = features_matrix[idx_b]
-        direction = val_b - val_a  # directional vector A -> B
+        direction = val_b - val_a
 
-        # Phase 2: Directional Interpolation / Extrapolation
         if rng.random() < 0.5:
-            # Interpolation: r uniformly in [0, 1] (stay on the A-B segment)
             r_val = rng.uniform(0.0, 1.0)
         else:
-            # Extrapolation: exponential decay beyond the A-B boundaries.
-            # rate=1 keeps typical |t| ≈ 1; large |t| is exponentially rarer.
-            t_exp = rng.exponential(scale=1.0)
+            t_exp = rng.exponential(scale=0.5)
             sign  = rng.choice([-1.0, 1.0])
-            r_val = sign * t_exp  # can be negative (beyond A) or > 1 (beyond B)
+            r_val = sign * t_exp
 
-        interpolated = val_a + r_val * direction
+        interpolated    = val_a + r_val * direction
+        r_val_clamped   = float(np.clip(r_val, 0.0, 1.0))
+        perturbed       = intelligent_perturbing(interpolated, enc_size, enc_rows, sampler_name, rng)
 
-        # Clamped r for the n_nodes_mean estimate (node count only makes sense in [0,1])
-        r_val_clamped = float(np.clip(r_val, 0.0, 1.0))
-
-        # Phase 3: Dimensional Perturbation
-        # Gaussian noise with std = 10 % of the absolute coordinate distance per dimension.
-        noise_std = 0.1 * np.abs(direction)
-        perturbed = interpolated + rng.normal(0.0, noise_std)
-
-        # Phase 4a: Semantic Validation
         if not encoder.load_embedding(perturbed, class_id=0):
             continue
 
-        # Phase 4b: Topological Validation (O(1) — no graph generated)
-        # Inspect encoder._encodings[0] to bound max reachable n_nodes and avg_degree.
-        enc = encoder._encodings[0]
-        if enc is None:
+        if not _check_topo(encoder, sampler_name):
+            logger.debug(f"Phase 2 topological check failed: max_nodes={encoder._encodings[0][-1, 0] if encoder._encodings[0] is not None and sampler_name != 'moments' else 'unknown'} — discarding.")
             continue
 
-        if sampler_name == "moments":
-            # enc shape (k, num_features): row 0 = mean, row 1 = variance.
-            # 3-sigma rule covers 99.7 % of generated graphs.
-            mu_nodes   = float(enc[0, 0])
-            mu_degree  = float(enc[0, 1])
-            if enc.shape[0] >= 2:
-                sigma_nodes  = float(np.sqrt(max(enc[1, 0], 0.0)))
-                sigma_degree = float(np.sqrt(max(enc[1, 1], 0.0)))
-            else:
-                sigma_nodes = sigma_degree = 0.0
-            max_nodes  = mu_nodes  + 3.0 * sigma_nodes
-            max_degree = mu_degree + 3.0 * sigma_degree
-        else:
-            # Percentile / GMCM: enc shape (num_percentiles, num_features).
-            # Last row = 100th percentile = absolute maximum.
-            max_nodes  = float(enc[-1, 0])
-            max_degree = float(enc[-1, 1])
-
-        max_edges = (max_nodes * max_degree) / 2.0
-
-        if max_nodes > 500 or max_edges > 1000:
-            logger.debug(f"Topological check failed: max_nodes={max_nodes:.1f}, max_edges={max_edges:.1f} — discarding.")
-            continue
-
-        # All checks passed — record the target.
         target_row = {
             "Dataset": f"target_{target_idx}",
             "Num_Graphs": mean_num_graphs,
@@ -283,44 +443,49 @@ def generate_target_statistics(stats_rows: list[dict[str, str | int | float | No
         }
         for j, feat in enumerate(targeted_features):
             target_row[feat] = float(perturbed[j])
-
+        _add_targeted_stats_to_row(target_row, {})
         for feat in non_targeted_features:
             target_row[feat] = None
 
         target_rows.append(target_row)
         target_idx += 1
-            
+
     if len(target_rows) < num_synth_datasets:
-        logger.warning(f"Only generated {len(target_rows)} valid target embeddings out of {num_synth_datasets} after {attempts} attempts.")
-        
+        logger.warning(f"generate_target_statistics: generated only {len(target_rows)}/{num_synth_datasets} targets after Phase 1 + Phase 2 ({attempts} Phase-2 attempts).")
+
     return target_rows
 
 
-
 def worker_generate_graph(task: dict) -> tuple:
-    """Generates a single graph for a synthetic dataset (Phase C)."""
+    """Generates a single graph for a synthetic dataset (Phase C).
+
+    Returns:
+        A 4-tuple ``(pyg_data, info, success, log_msg)`` where *log_msg* is
+        either ``None`` (no message) or a plain ``str`` to be logged by the
+        caller.  The *success* flag is ``False`` when a fallback graph was
+        produced.
+    """
     import numpy as np
     import torch
     from src.generate_datasets import generate_graph, networkx_to_igraph
     from src.data_utils import igraph_to_pytorch
     from torch_geometric.data import Data
-    
+
     target_stats = task["target_stats"]
     method = task["method"]
     seed = task["seed"]
-    
+
     rng = np.random.default_rng(seed)
     try:
         synth_nx, info = generate_graph(target_stats, method, rng)
         synth_ig = networkx_to_igraph(synth_nx)
         pyg_data = igraph_to_pytorch(synth_ig, y=torch.tensor([0]))
-        return pyg_data, info, True
+        return pyg_data, info, True, None
     except Exception as exc:
-        # Fallback for graph generation failure
-        import logging
-        logging.getLogger(__name__).warning(f"Graph generation failed for method '{method}': {exc}")
+        # Build a fallback placeholder graph — no logging here (see docstring).
+        log_msg = f"Graph generation failed for method '{method}' (seed={seed}): {exc}"
         pyg_data = Data(x=torch.ones((1, 1)), edge_index=torch.empty((2, 0), dtype=torch.long), y=torch.tensor([0]), num_nodes=1)
-        return pyg_data, {}, False
+        return pyg_data, {}, False, log_msg
 
 
 
@@ -399,11 +564,22 @@ def main() -> None:
             stats_rows.append(row)
 
     # Save the aggregated statistics to a CSV in results
+    results_dir = project_root / "results"
     if stats_rows:
-        results_dir = project_root / "results"
         csv_path = results_dir / "original_datasets_mean_stats.csv"
         _write_csv(stats_rows, csv_path)
         logger.info(f"Phase A completed. Mean statistics saved to {csv_path}")
+
+    # Determine whether Phase B/C should append to existing CSVs or overwrite them.
+    target_csv_path = results_dir / "target_datasets_mean_stats.csv"
+    synth_csv_path  = results_dir / "synthetic_datasets_mean_stats.csv"
+    append_mode = (
+        not args.process_original
+        and target_csv_path.exists()
+        and synth_csv_path.exists()
+    )
+    if append_mode:
+        logger.info("Append mode: new target/synthetic rows will be added to existing CSV files.")
 
     # ── PHASE B: Target Datasets Generation ─────────────────────────────────────────────
     logger.info("=" * 60)
@@ -417,16 +593,29 @@ def main() -> None:
     # Choose between the uniform range, SMOTE-inspired, or asymmetric interpolation method
     target_rows = generate_target_statistics(stats_rows, args.num_synth_datasets, args.sampler, rng)
 
-    # Save target statistics to CSV
-    results_dir = project_root / "results"
-    target_csv_path = results_dir / "target_datasets_mean_stats.csv"
-    _write_csv(target_rows, target_csv_path)
-    logger.info(f"Phase B completed. Target mean statistics saved to {target_csv_path}")
+    # Renumber Dataset indices to continue from the last existing row when appending.
+    if append_mode and target_rows:
+        import pandas as _pd
+        existing_count = len(_pd.read_csv(target_csv_path))
+        for i, row in enumerate(target_rows):
+            row["Dataset"] = f"target_{existing_count + i}"
+
+    # Save / append target statistics to CSV.
+    if append_mode:
+        _append_csv(target_rows, target_csv_path)
+        logger.info(f"Phase B completed. Appended {len(target_rows)} target rows to {target_csv_path}")
+    else:
+        _write_csv(target_rows, target_csv_path)
+        logger.info(f"Phase B completed. Target mean statistics saved to {target_csv_path}")
 
     # ── PHASE C: Synthetic Datasets Generation ─────────────────────────────────────────────
     logger.info("=" * 60)
     logger.info(f"PHASE C: Generating and evaluating synthetic datasets using {args.method}")
     logger.info("=" * 60)
+
+    if not target_rows:
+        logger.error("Phase B produced 0 valid target embeddings — aborting Phase C.")
+        return
 
     num_emb_features = sum(1 for k in target_rows[0].keys() if k.startswith("emb_"))
     
@@ -441,9 +630,11 @@ def main() -> None:
         _, stat_structure = flatten_stats(orig_metadata.get("per_graph_statistics", [])[0])
 
     synth_rows = []
-    
-    # Initialize a Pool once for generating the graphs in parallel
-    pool = mp.Pool(processes=args.num_workers) if args.num_workers > 1 else None
+
+    # Use the 'spawn' start method to avoid deadlocks from inherited locks
+    # (logging, tqdm, etc.) that are a known hazard of the default 'fork' on Linux.
+    _spawn_ctx = mp.get_context("spawn")
+    pool = _spawn_ctx.Pool(processes=args.num_workers) if args.num_workers > 1 else None
     
     try:
         from src.data_utils import unflatten_stats, flatten_stats
@@ -480,12 +671,16 @@ def main() -> None:
             infos = []
             if pool is not None:
                 results = pool.map(worker_generate_graph, graph_tasks)
-                for pyg_data, info, success in results:
+                for pyg_data, info, success, log_msg in results:
+                    if log_msg is not None:
+                        logger.warning(log_msg)
                     graphs.append(pyg_data)
                     infos.append(info)
             else:
                 for task in graph_tasks:
-                    pyg_data, info, success = worker_generate_graph(task)
+                    pyg_data, info, success, log_msg = worker_generate_graph(task)
+                    if log_msg is not None:
+                        logger.warning(log_msg)
                     graphs.append(pyg_data)
                     infos.append(info)
                     
@@ -524,23 +719,33 @@ def main() -> None:
             for idx, val in enumerate(synth_emb):
                 row[f"emb_{idx}"] = val
                 
+            # Add targeted stats (n_edges + vector stats)
+            _add_targeted_stats_to_row(row, synth_agg)
+
             # Add non-targeted metrics
             row["modularity_mean"] = synth_agg.get("modularity", 0.0)
             row["clustering_mean"] = synth_agg.get("clustering", 0.0)
             row["assortativity_mean"] = synth_agg.get("assortativity", 0.0)
             row["efficiency_mean"] = synth_agg.get("efficiency", 0.0)
             row["diameter_mean"] = synth_agg.get("diameter", 0.0)
-            
+
             synth_rows.append(row)
     finally:
         if pool is not None:
             pool.close()
             pool.join()
 
-    # Save the synthetic dataset statistics to a CSV in results
-    synth_csv_path = results_dir / "synthetic_datasets_mean_stats.csv"
-    _write_csv(synth_rows, synth_csv_path)
-    logger.info(f"Phase C completed. Synthetic datasets statistics saved to {synth_csv_path}")
+    # Save / append synthetic dataset statistics to a CSV.
+    if append_mode and synth_rows:
+        import pandas as _pd
+        existing_synth_count = len(_pd.read_csv(synth_csv_path))
+        for i, row in enumerate(synth_rows):
+            row["Dataset"] = f"synth_{existing_synth_count + i}"
+        _append_csv(synth_rows, synth_csv_path)
+        logger.info(f"Phase C completed. Appended {len(synth_rows)} synthetic rows to {synth_csv_path}")
+    else:
+        _write_csv(synth_rows, synth_csv_path)
+        logger.info(f"Phase C completed. Synthetic datasets statistics saved to {synth_csv_path}")
     
 if __name__ == "__main__":
     main()
