@@ -231,7 +231,11 @@ def calculate_eccentricity(graph: ig.Graph, bins: int = 4, bin_indices: list[np.
     if n_nodes == 0:
         return np.zeros(bins, dtype=float), bin_indices if bin_indices is not None else [np.array([], dtype=int)] * bins
 
-    eccentricities = graph.eccentricity()
+    dists = np.array(graph.distances(), dtype=float)
+    # Mask out infinity (unreachable paths) by replacing them with -1.0
+    finite_dists = np.where(np.isinf(dists), -1.0, dists)
+    eccentricities = np.max(finite_dists, axis=1)
+
     if bin_indices is None:
         node_degrees = np.array(graph.degree(), dtype=int)
         n_active = np.count_nonzero(node_degrees)

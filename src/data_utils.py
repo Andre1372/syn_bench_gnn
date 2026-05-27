@@ -316,9 +316,13 @@ def preprocess_and_save_original_dataset(
     num_classes = raw_dataset.num_classes
 
     if is_per_graph_strategy(feature_type):
+        # Verify that the dataset has native node features.
+        first_graph = raw_dataset[0]
+        if first_graph.x is None:
+            raise ValueError(f"Dataset '{dataset_name}' does not contain native node features, which are required for the per-graph feature strategy '{feature_type}'.")
         # Preserve original TUDataset node features.
         original_data_list = [
-            Data(x=d.x.float() if d.x is not None else None, edge_index=d.edge_index, y=d.y, num_nodes=d.num_nodes)
+            Data(x=d.x.float(), edge_index=d.edge_index, y=d.y, num_nodes=d.num_nodes)
             for d in raw_dataset
         ]
     else:
@@ -327,6 +331,17 @@ def preprocess_and_save_original_dataset(
             Data(edge_index=d.edge_index, y=d.y, num_nodes=d.num_nodes)
             for d in raw_dataset
         ]
+
+    # Ensure labels are 0-indexed sequential integers
+    all_y = torch.cat([d.y for d in original_data_list if d.y is not None]).view(-1)
+    unique_labels = torch.unique(all_y)
+    if len(unique_labels) > 0 and not torch.equal(unique_labels, torch.arange(len(unique_labels), dtype=unique_labels.dtype, device=unique_labels.device)):
+        logger.info(f"Remapping labels for {dataset_name} to 0-indexed sequential integers...")
+        label_map = {val.item(): i for i, val in enumerate(unique_labels)}
+        for d in original_data_list:
+            if d.y is not None:
+                d.y = torch.tensor([label_map[d.y.item()]], dtype=torch.long)
+        num_classes = len(unique_labels)
 
     # 1. Binarize labels if multi-class using optimal partitioning for balance
     if num_classes > 2:
