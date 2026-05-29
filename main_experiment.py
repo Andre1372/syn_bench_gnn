@@ -18,6 +18,7 @@ from src.data_utils import load_all_synthetic_variants, get_split_indices, prepr
 from src.generate_datasets import generate_synthetic_variants, KNOWN_METHODS
 from src.enc_dec_dataset import KNOWN_SAMPLERS
 from src.train_gnn import evaluate_dataset
+from src.node_features import is_per_graph_strategy
 
 ALL_DATASETS = [
         "BZR", "DHFR", "Mutagenicity", "MUTAG"
@@ -245,23 +246,34 @@ def main() -> None:
         logger.info("=" * 60)
 
         for dataset_name in args.dataset:
+            generated_origs = set()
             for feature, sampler in run_combos:
-                # Each (feature, sampler) combo may need its own preprocessed original dataset
-                # because the feature strategy is baked into the .pt file.
-                orig_pt_path = project_root / "data" / dataset_name / f"{dataset_name}_original.pt"
+                if is_per_graph_strategy(feature):
+                    orig_fname = f"{dataset_name}_original_native.pt"
+                else:
+                    orig_fname = f"{dataset_name}_original_{feature}.pt"
+
+                orig_pt_path = project_root / "data" / dataset_name / orig_fname
+                
+                process_this = args.process_original
                 if not orig_pt_path.exists():
-                    args.process_original = True
-                    logger.info(f"Dataset {dataset_name} not found, enabling --process_original.")
-                if args.process_original:
+                    process_this = True
+                    logger.info(f"Dataset {dataset_name} ({orig_fname}) not found, forcing processing.")
+                
+                if process_this and orig_fname not in generated_origs:
                     preprocess_and_save_original_dataset(
                         dataset_name,
                         project_root / "data",
                         max_size=args.cut_datasets,
                         rng=rng,
                         feature_type=feature,
+                        out_filename=orig_fname,
                     )
+                    generated_origs.add(orig_fname)
+                elif orig_fname in generated_origs:
+                    logger.info(f"Using just-generated original dataset for {dataset_name} ({orig_fname}).")
                 else:
-                    logger.info(f"Using existing original dataset for {dataset_name} (skip re-processing).")
+                    logger.info(f"Using existing original dataset for {dataset_name} ({orig_fname}) (skip re-processing).")
 
                 for method in args.methods:
                     tag = _combo_tag(feature, sampler)
@@ -312,11 +324,21 @@ def main() -> None:
         logger.info(f"DATASET: {dataset_name}")
         logger.info("─" * 60)
 
+        evaluated_origs = set()
+
         for feature, sampler in run_combos:
             tag = _combo_tag(feature, sampler)
             logger.info(f"  Combination: features={feature}  sampler={sampler}")
 
-            orig_pt_path = project_root / "data" / dataset_name / f"{dataset_name}_original.pt"
+            if is_per_graph_strategy(feature):
+                orig_fname = f"{dataset_name}_original_native.pt"
+                orig_eval_tag = "native"
+            else:
+                orig_fname = f"{dataset_name}_original_{feature}.pt"
+                orig_eval_tag = feature
+
+            orig_pt_path = project_root / "data" / dataset_name / orig_fname
+            
             if not orig_pt_path.exists():
                 preprocess_and_save_original_dataset(
                     dataset_name,
@@ -324,6 +346,7 @@ def main() -> None:
                     max_size=args.cut_datasets,
                     rng=rng,
                     feature_type=feature,
+                    out_filename=orig_fname,
                 )
 
             orig_dataset_obj = DatasetPT(orig_pt_path)
@@ -341,25 +364,29 @@ def main() -> None:
 
             # Optionally evaluate on original dataset and save the baseline CSV
             if args.process_original:
-                logger.info(f"Evaluating original dataset ({dataset_name}) [combo={tag}]...")
+                if orig_eval_tag not in evaluated_origs:
+                    logger.info(f"Evaluating original dataset ({dataset_name}) [feature={orig_eval_tag}]...")
 
-                # Match the total number of runs used across all synthetic variants (R * V)
-                orig_gnn_config = gnn_config.copy()
-                orig_gnn_config["num_runs"] = gnn_config["num_runs"] * args.num_synth_datasets
+                    # Match the total number of runs used across all synthetic variants (R * V)
+                    orig_gnn_config = gnn_config.copy()
+                    orig_gnn_config["num_runs"] = gnn_config["num_runs"] * args.num_synth_datasets
 
-                with tqdm(total=orig_gnn_config["num_runs"], desc=f"GNN [Original/{dataset_name}/{tag}]") as pbar:
-                    with logging_redirect_tqdm():
-                        glob_res, pg_res = evaluate_dataset(
-                            pt_path=orig_pt_path,
-                            gnn_config=orig_gnn_config,
-                            device=device,
-                            split_indices=split_indices,
-                            dataset_name=dataset_name,
-                            pbar=pbar,
-                        )
-                _write_csv(glob_res, results_dir / f"gnn_global_{dataset_name}_original_{tag}.csv")
-                _write_csv(pg_res,   results_dir / f"gnn_per_graph_{dataset_name}_original_{tag}.csv")
-                logger.info(f"Original results saved → gnn_global_{dataset_name}_original_{tag}.csv")
+                    with tqdm(total=orig_gnn_config["num_runs"], desc=f"GNN [Original/{dataset_name}/{orig_eval_tag}]") as pbar:
+                        with logging_redirect_tqdm():
+                            glob_res, pg_res = evaluate_dataset(
+                                pt_path=orig_pt_path,
+                                gnn_config=orig_gnn_config,
+                                device=device,
+                                split_indices=split_indices,
+                                dataset_name=dataset_name,
+                                pbar=pbar,
+                            )
+                    _write_csv(glob_res, results_dir / f"gnn_global_{dataset_name}_original_{orig_eval_tag}.csv")
+                    _write_csv(pg_res,   results_dir / f"gnn_per_graph_{dataset_name}_original_{orig_eval_tag}.csv")
+                    logger.info(f"Original results saved → gnn_global_{dataset_name}_original_{orig_eval_tag}.csv")
+                    evaluated_origs.add(orig_eval_tag)
+                else:
+                    logger.info(f"Original dataset ({dataset_name}) [feature={orig_eval_tag}] already evaluated. Skipping.")
 
             # Evaluate each synthetic method
             for method in args.methods:

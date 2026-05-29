@@ -309,7 +309,9 @@ def _accumulate_result(
         source_x: If provided, a per-graph feature assigner is built from this tensor; overrides *assigner*.
         feature_type: The type of feature strategy (used to select the correct assigner).
     """
-    i, graphs, seeds, errors, infos = result
+    i, graphs, seeds, errors, infos, captured_logs = result
+    for log_msg in captured_logs:
+        logger.info(f"[Worker {i}] {log_msg}")
     for variant_idx, exc_msg in errors:
         logger.error(f"Generation failed for graph {i} variant {variant_idx} (method={method}): {exc_msg}")
     for v in range(num_variants):
@@ -379,14 +381,21 @@ def generate_synthetic_variants(
     if distribution_sampler is not None and method in {"pdd", "ergm"}:
         raise ValueError(f"Method '{method}' requires 'observed_nx' and is incompatible with distribution sampling.")
 
-    orig_pt_path = project_root / "data" / dataset_name / f"{dataset_name}_original.pt"
+    effective_feature_type: str = feature_type if feature_type is not None else "constant"
+
+    if is_per_graph_strategy(effective_feature_type):
+        orig_fname = f"{dataset_name}_original_native.pt"
+    else:
+        orig_fname = f"{dataset_name}_original_{effective_feature_type}.pt"
+
+    orig_pt_path = project_root / "data" / dataset_name / orig_fname
     if not orig_pt_path.exists():
-        preprocess_and_save_original_dataset(dataset_name, project_root / "data")
+        preprocess_and_save_original_dataset(dataset_name, project_root / "data", out_filename=orig_fname, feature_type=effective_feature_type)
 
     dataset_obj = DatasetPT(orig_pt_path)
     ds_metadata = dataset_obj.metadata
-    # Use the explicitly passed feature_type if provided; fall back to metadata.
-    effective_feature_type: str = feature_type if feature_type is not None else ds_metadata.get("feature_type", "constant")
+    # If feature_type was None, we sync it with metadata just in case.
+    effective_feature_type = feature_type if feature_type is not None else ds_metadata.get("feature_type", "constant")
 
     if is_per_graph_strategy(effective_feature_type) and distribution_sampler is not None:
         raise ValueError(f"'{effective_feature_type}' features are per-graph and incompatible with distribution_sampler.")
@@ -425,7 +434,8 @@ def generate_synthetic_variants(
     if num_workers > 1:
         logger.info(f"Generating synthetic variants in parallel using {num_workers} workers.")
         chunksize = max(1, len(tasks) // (num_workers * 2))
-        with mp.Pool(processes=num_workers) as pool:
+        _spawn_ctx = mp.get_context("spawn")
+        with _spawn_ctx.Pool(processes=num_workers) as pool:
             results = list(tqdm(pool.imap_unordered(worker_func, tasks, chunksize=chunksize), total=len(tasks), desc=f"Phase A [{dataset_name}/{method}]"))
         results.sort(key=lambda r: r[0])
         for result in results:
@@ -485,7 +495,7 @@ def generate_synthetic_variants(
         save_synthetic_dataset(graphs, output_dir, filename, extra_metadata=variant_metadata)
         logger.info(f"Saved variant {v + 1}/{num_variants} for {dataset_name}/{method} → {output_dir / filename}")
 
-def _worker_generate_variants(task: dict, method: str, num_variants: int) -> tuple[int, list, list, list, list]:
+def _worker_generate_variants(task: dict, method: str, num_variants: int) -> tuple[int, list, list, list, list, list]:
     """Generates all synthetic variants for a single graph (worker entry point).
 
     Args:
@@ -493,33 +503,52 @@ def _worker_generate_variants(task: dict, method: str, num_variants: int) -> tup
         method: Generation method name.
         num_variants: Number of variants to generate
     Returns:
-        Tuple ``(graph_idx, graphs, seeds, errors, infos)``.
+        Tuple ``(graph_idx, graphs, seeds, errors, infos, captured_logs)``.
     """
-    torch.set_num_threads(1)
-
-    i: int = task["i"]
-    target_stats_list: list[dict] = task["target_stats"]
-    y = task["y"]
-    obs_nx = task["obs_nx"]
-    seeds_list: list[int] = task["seeds"]
-
-    graphs, seeds, infos, errors = [], [], [], []
-
-    for v in range(num_variants):
-        current_seed = seeds_list[v]
-        target_stats = dict(target_stats_list[v])
-        if obs_nx is not None:
-            target_stats["observed_nx"] = obs_nx
-        try:
-            synth_nx, info = generate_graph(target_stats, method, np.random.default_rng(current_seed))
-            synth_ig = networkx_to_igraph(synth_nx)
-            graphs.append(synth_ig)
-            seeds.append(current_seed)
-            infos.append(info)
-        except Exception as exc:
-            errors.append((v, str(exc)))
-            graphs.append(None)
-            seeds.append(-1)
-            infos.append({})
-
-    return i, graphs, seeds, errors, infos
+    import io
+    import logging
+    
+    log_stream = io.StringIO()
+    handler = logging.StreamHandler(log_stream)
+    handler.setFormatter(logging.Formatter('%(levelname)s: %(message)s'))
+    
+    root_logger = logging.getLogger()
+    old_handlers = root_logger.handlers[:]
+    old_level = root_logger.level
+    
+    root_logger.handlers = [handler]
+    root_logger.setLevel(logging.INFO)
+    
+    try:
+        torch.set_num_threads(1)
+    
+        i: int = task["i"]
+        target_stats_list: list[dict] = task["target_stats"]
+        y = task["y"]
+        obs_nx = task["obs_nx"]
+        seeds_list: list[int] = task["seeds"]
+    
+        graphs, seeds, infos, errors = [], [], [], []
+    
+        for v in range(num_variants):
+            current_seed = seeds_list[v]
+            target_stats = dict(target_stats_list[v])
+            if obs_nx is not None:
+                target_stats["observed_nx"] = obs_nx
+            try:
+                synth_nx, info = generate_graph(target_stats, method, np.random.default_rng(current_seed))
+                synth_ig = networkx_to_igraph(synth_nx)
+                graphs.append(synth_ig)
+                seeds.append(current_seed)
+                infos.append(info)
+            except Exception as exc:
+                errors.append((v, str(exc)))
+                graphs.append(None)
+                seeds.append(-1)
+                infos.append({})
+    finally:
+        root_logger.handlers = old_handlers
+        root_logger.setLevel(old_level)
+        
+    captured_logs = [line for line in log_stream.getvalue().splitlines() if line.strip()]
+    return i, graphs, seeds, errors, infos, captured_logs

@@ -460,32 +460,52 @@ def worker_generate_graph(task: dict) -> tuple:
     """Generates a single graph for a synthetic dataset (Phase C).
 
     Returns:
-        A 4-tuple ``(pyg_data, info, success, log_msg)`` where *log_msg* is
-        either ``None`` (no message) or a plain ``str`` to be logged by the
-        caller.  The *success* flag is ``False`` when a fallback graph was
-        produced.
+        A 4-tuple ``(pyg_data, info, success, captured_logs)`` where *captured_logs* is
+        a list of log messages.
     """
+    import io
+    import logging
     import numpy as np
     import torch
     from src.generate_datasets import generate_graph, networkx_to_igraph
     from src.data_utils import igraph_to_pytorch
     from torch_geometric.data import Data
 
-    target_stats = task["target_stats"]
-    method = task["method"]
-    seed = task["seed"]
+    log_stream = io.StringIO()
+    handler = logging.StreamHandler(log_stream)
+    handler.setFormatter(logging.Formatter('%(levelname)s: %(message)s'))
+    
+    root_logger = logging.getLogger()
+    old_handlers = root_logger.handlers[:]
+    old_level = root_logger.level
+    
+    root_logger.handlers = [handler]
+    root_logger.setLevel(logging.INFO)
+    
+    captured_logs = []
 
-    rng = np.random.default_rng(seed)
     try:
-        synth_nx, info = generate_graph(target_stats, method, rng)
-        synth_ig = networkx_to_igraph(synth_nx)
-        pyg_data = igraph_to_pytorch(synth_ig, y=torch.tensor([0]))
-        return pyg_data, info, True, None
-    except Exception as exc:
-        # Build a fallback placeholder graph — no logging here (see docstring).
-        log_msg = f"Graph generation failed for method '{method}' (seed={seed}): {exc}"
-        pyg_data = Data(x=torch.ones((1, 1)), edge_index=torch.empty((2, 0), dtype=torch.long), y=torch.tensor([0]), num_nodes=1)
-        return pyg_data, {}, False, log_msg
+        target_stats = task["target_stats"]
+        method = task["method"]
+        seed = task["seed"]
+    
+        rng = np.random.default_rng(seed)
+        try:
+            synth_nx, info = generate_graph(target_stats, method, rng)
+            synth_ig = networkx_to_igraph(synth_nx)
+            pyg_data = igraph_to_pytorch(synth_ig, y=torch.tensor([0]))
+            success = True
+        except Exception as exc:
+            captured_logs.append(f"Graph generation failed for method '{method}' (seed={seed}): {exc}")
+            pyg_data = Data(x=torch.ones((1, 1)), edge_index=torch.empty((2, 0), dtype=torch.long), y=torch.tensor([0]), num_nodes=1)
+            info = {}
+            success = False
+    finally:
+        root_logger.handlers = old_handlers
+        root_logger.setLevel(old_level)
+        
+    captured_logs.extend([line for line in log_stream.getvalue().splitlines() if line.strip()])
+    return pyg_data, info, success, captured_logs
 
 
 
@@ -671,15 +691,15 @@ def main() -> None:
             infos = []
             if pool is not None:
                 results = pool.map(worker_generate_graph, graph_tasks)
-                for pyg_data, info, success, log_msg in results:
-                    if log_msg is not None:
+                for pyg_data, info, success, captured_logs in results:
+                    for log_msg in captured_logs:
                         logger.warning(log_msg)
                     graphs.append(pyg_data)
                     infos.append(info)
             else:
                 for task in graph_tasks:
-                    pyg_data, info, success, log_msg = worker_generate_graph(task)
-                    if log_msg is not None:
+                    pyg_data, info, success, captured_logs = worker_generate_graph(task)
+                    for log_msg in captured_logs:
                         logger.warning(log_msg)
                     graphs.append(pyg_data)
                     infos.append(info)
