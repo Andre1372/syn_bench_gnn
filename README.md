@@ -46,10 +46,12 @@ syn_bench_gnn/
 ├── synthetic_data/             # Generated synthetic datasets from different methods
 ├── logs/                       # Log files for tracking and debugging runs
 ├── notebooks/                  # Post-hoc analysis and visualizations
-│   ├── embedding_dataset.ipynb         # Graph embedding and reconstruction analysis
-│   ├── generation_results_analysis.ipynb # Evaluation of different synthetic generators
-│   ├── gnn_result_analysis.ipynb       # Comparative GNN performance evaluations
-│   ├── single_generation_analysis.ipynb # In-depth diagnostic of single graph fitting runs
+│   ├── distribution_matching_analysis.ipynb # Statistical encoder-decoders (GMCM, Moments, Percentile) matching analysis
+│   ├── explain_performances.ipynb      # GNN performance factors, topological attributes
+│   ├── gen_flexibility_analysis.ipynb  # Synthetic generator parameters and structural flexibility analysis
+│   ├── gnn_result_analysis.ipynb       # Comparative GNN performance evaluation on original vs synthetic datasets
+│   ├── single_generation_analysis.ipynb # Visual diagnostic of single graph structure generations (2x3 subplot grids)
+│   ├── target_fidelity_analysis.ipynb  # Evaluation of structural fidelity and emergent metrics
 │   └── visualization_utils.py          # Shared plotting utilities
 ├── src/                        # Core source code of the project
 │   ├── anndg/                  # ANNDG and eccentricity statistical generator modules
@@ -61,13 +63,13 @@ syn_bench_gnn/
 │   ├── graph_analysis.py       # Metrics, Wasserstein distances, and feature analysis
 │   ├── log_utils.py            # Unified logging config and helpers
 │   └── train_gnn.py            # GNN model training and validation loops
-├── add_distributional_metadata.py # script to enrich dataset files with distributional details
-├── benchmark_gnn.py            # Main test suite to benchmark GNN architectures
-├── download_tudatasets.py      # Downloader script for source TUDatasets
-├── inspect_log_bins.py         # Utility to inspect log-degree distributions
-├── main_experiment.py          # Full experimental pipeline (Generation -> GNN Training -> Evaluation)
-├── test_zero_deg.py            # Helper utility to check for zero-degree nodes
-├── train_original_only.py      # Baseline runner to train GNN models on original datasets only
+├── add_distributional_metadata.py # Script to enrich dataset files with distributional details [DEPRECATED]
+├── benchmark_gnn.py            # Main test suite to benchmark GNN architectures [DEPRECATED]
+├── download_tudatasets.py      # Downloader script for source TUDatasets (Optional helper)
+├── inspect_log_bins.py         # Utility to inspect log-degree distributions [DEPRECATED]
+├── main_experiment.py          # Full experimental pipeline (Generation -> GNN Training -> Evaluation) [PRIMARY ENTRY POINT]
+├── test_zero_deg.py            # Helper utility to check for zero-degree nodes [DEPRECATED]
+├── train_original_only.py      # Baseline runner to train GNN models on original datasets only [DEPRECATED]
 ├── requirements.txt            # Python dependencies
 └── README.md                   # This README file
 ```
@@ -134,17 +136,23 @@ nohup python main_experiment.py --cut_datasets 500 --features_BinLogDeg --proces
 
 All notebooks have a synchronized `.py` copy in the same directory. These Python files are used to facilitate version control and integration with AI agents, and should be kept in sync with the corresponding `.ipynb` notebooks.
 
-The most important notebooks are:
-- `notebooks/generation_results_analysis.ipynb`: Analyzes the quality of the generated graphs and of the encoding-decoding scheme.
-- `notebooks/gnn_result_analysis.ipynb`: Analysis of GNN performance on original and synthetic datasets.
+The available analysis notebooks are:
+- **`notebooks/distribution_matching_analysis.ipynb`**: Analyzes the quality of the encoding-decoding schemes and sampling strategies (GMCM, moments, percentile, percentile_corr) for reproducing distributions.
+- **`notebooks/explain_performances.ipynb`**: Investigates how topological graph features influence class separability (PCA/t-SNE) and how feature strategies (e.g., log-binning degree vs. constant dummy features) affect GNN performance (GCN, GIN).
+- **`notebooks/gen_flexibility_analysis.ipynb`**: Evaluates the adaptability and structural flexibility of different synthetic graph generators under varying configurations.
+- **`notebooks/gnn_result_analysis.ipynb`**: Provides comparative GNN evaluation on original and synthetic datasets, showcasing performance preservation and downstream task utility.
+- **`notebooks/single_generation_analysis.ipynb`**: Offers visual diagnostics of single-graph structure generations, featuring a 2x3 grid to compare target original structures against synthetic methods (`dummyNodes`, `dummyEdges`, `padma`, `anndg`, `anndgE`).
+- **`notebooks/target_fidelity_analysis.ipynb`**: Rigorously evaluates structural fidelity (MAE of nodes, edges, degree moments, ANND, eccentricity) and implicit emergent properties (clustering, assortativity, modularity, efficiency, diameter) using scatter plots, CDF error distributions, KDE density curves, and performance heatmaps.
 
 
 ## Auxiliary Scripts & Utilities
 
-The root directory contains several auxiliary scripts and diagnostic tools:
-- **`download_tudatasets.py`**: A helper script to download and locally cache raw TUDatasets.
-- **`train_original_only.py`**: A baseline script to train and evaluate GNN architectures exclusively on original graphs.
-- **`add_distributional_metadata.py`**, **`benchmark_gnn.py`**, **`inspect_log_bins.py`**, and **`test_zero_deg.py`**: Specialized tools for data-preparation, localized profiling, and graph sanity checks.
+The root directory contains several secondary scripts, though their use is highly restricted:
+- **`download_tudatasets.py`**: A helper script that can be used to download, filter, and pre-cache raw TUDatasets structurally and through initial GNN evaluations.
+  > [!NOTE]
+  > Using this script is **entirely optional**. `main_experiment.py` is fully autonomous and will automatically download, pre-process, and split the required datasets if they are not already present in the `data/` folder.
+
+- **`train_original_only.py`**, **`add_distributional_metadata.py`**, **`benchmark_gnn.py`**, **`inspect_log_bins.py`**, and **`test_zero_deg.py`**: Outdated baseline, data-preparation, and localized profiling tools.
 
 > [!WARNING]  
-> These auxiliary scripts are currently **outdated and may not function correctly** due to recent codebase and API updates. They are **not** necessary to run the primary benchmarking pipeline (`main_experiment.py`), and it is highly recommended **not to use them** for the time being.
+> Apart from `download_tudatasets.py` (which is optional), **all other auxiliary root scripts are deprecated and it is strongly recommended NOT to use them**. They may not function correctly due to recent API refactorings, are completely redundant, and are not needed for any part of the workflow. The full pipeline is completely handled by `main_experiment.py`.
