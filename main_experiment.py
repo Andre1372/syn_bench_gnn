@@ -22,6 +22,7 @@ from src.node_features import is_per_graph_strategy
 
 ALL_DATASETS = [
         "BZR", "DHFR", "Mutagenicity", "MUTAG"
+        # "AIDS", "BZR", "COX2", "DHFR", "Mutagenicity", "MUTAG", "NCI1", "NCI109", "DD", "PROTEINS", "Cuneiform", "MSRC_9", "MSRC_21", "MSRC_21C", "KKI", "OHSU", "ENZYMES"
     ]
 
 # ---------------------------------------------------------------------------

@@ -76,7 +76,8 @@ def _canonical_order(values, order):
 
 def load_experiment_data() -> pd.DataFrame:
     """Loads and preprocesses main GNN evaluation data."""
-    sampler_alts = "|".join(re.escape(s) for s in SAMPLER_ORDER)
+    # Sort SAMPLER_ORDER by length descending so that 'percentile_corr' matches before 'percentile'
+    sampler_alts = "|".join(re.escape(s) for s in sorted(SAMPLER_ORDER, key=len, reverse=True))
     results_pattern = re.compile(
         r"gnn_global_"
         r"(?P<dname>[A-Za-z][A-Za-z0-9\-]*)_"          # dataset name
@@ -149,8 +150,10 @@ def _resolve_vary_axis() -> str:
 def _filter_df(df: pd.DataFrame) -> pd.DataFrame:
     """Filters df to rows matching the two fixed dimensions."""
     mask = pd.Series(True, index=df.index)
-    if FIXED_METHODS  is not None: mask &= (df["method"]  == FIXED_METHODS)
-    if FIXED_SAMPLERS is not None: mask &= (df["sampler"] == FIXED_SAMPLERS)
+    # Always keep the original baseline, overriding method and sampler filters.
+    # However, for features, we still filter the baseline because baselines are feature-specific.
+    if FIXED_METHODS  is not None: mask &= ((df["method"]  == FIXED_METHODS) | (df["source_base"] == "original"))
+    if FIXED_SAMPLERS is not None: mask &= ((df["sampler"] == FIXED_SAMPLERS) | (df["source_base"] == "original"))
     if FIXED_FEATURES is not None: mask &= (df["feature"] == FIXED_FEATURES)
     return df[mask].copy()
 

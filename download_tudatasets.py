@@ -26,7 +26,7 @@ logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
 logger = logging.getLogger(__name__)
 
 
-def fetch_dataset_stats(dataset_name: str, data_dir: Path) -> dict[str, Any] | None:
+def fetch_dataset_stats(dataset_name: str, data_dir: Path, feature_type: str = "log_bin_deg") -> dict[str, Any] | None:
     """Downloads a TUDataset and extracts its structural statistics."""
     try:
         dataset = TUDataset(root=str(data_dir), name=dataset_name)
@@ -44,6 +44,17 @@ def fetch_dataset_stats(dataset_name: str, data_dir: Path) -> dict[str, Any] | N
         avg_edges = float(np.mean(edges))
         std_edges = float(np.std(edges))
 
+        from src.data_utils import is_per_graph_strategy
+        has_features = (num_features > 0)
+        is_per_graph = is_per_graph_strategy(feature_type)
+
+        if is_per_graph and not has_features:
+            compatible = False
+            discard_reason = "missing_features"
+        else:
+            compatible = (num_graphs >= 50 and num_graphs <= 5000 and avg_nodes <= 300)
+            discard_reason = "structural" if not compatible else None
+
         return {
             "dataset": dataset_name,
             "graphs": num_graphs,
@@ -53,7 +64,8 @@ def fetch_dataset_stats(dataset_name: str, data_dir: Path) -> dict[str, Any] | N
             "avg_edges": avg_edges,
             "std_edges": std_edges,
             "node_features": num_features,
-            "compatible": (num_graphs >= 50 and num_graphs <= 5000 and avg_nodes <= 300)
+            "compatible": compatible,
+            "discard_reason": discard_reason,
         }
     except Exception as e:
         logger.error(f"Failed to process dataset '{dataset_name}': {e}")
@@ -71,13 +83,20 @@ def cleanup_incompatible_dataset(dataset_name: str, data_dir: Path) -> None:
             logger.error(f"Error while deleting {dataset_name}: {e}")
 
 
-def display_results(stats_list: list[dict[str, Any]], discarded_structural: list[str], discarded_f1: list[str], ran_benchmark: bool = True, min_f1: float = MIN_F1_THRESHOLD, feature_type: str = "log_bin_deg") -> None:
+def display_results(stats_list: list[dict[str, Any]], discarded_structural: list[str], discarded_f1: list[str], discarded_features: list[str] = None, ran_benchmark: bool = True, min_f1: float = MIN_F1_THRESHOLD, feature_type: str = "log_bin_deg") -> None:
     """Formats and prints the compatible and discarded dataset statistics to the console."""
     if discarded_structural:
         print("\n" + "="*80)
         print(f"Discarded by structural criteria ({len(discarded_structural)})")
         print("="*80)
         print(", ".join(discarded_structural))
+        print("="*80)
+
+    if discarded_features:
+        print("\n" + "="*80)
+        print(f"Discarded due to missing node features for per-graph strategy ({len(discarded_features)})")
+        print("="*80)
+        print(", ".join(discarded_features))
         print("="*80)
 
     if ran_benchmark and discarded_f1:
@@ -197,27 +216,33 @@ def main() -> None:
 
     structurally_compatible: list[dict[str, Any]] = []
     discarded_structural: list[str] = []
+    discarded_features: list[str] = []
     logger.info(f"Processing {len(dataset_names)} TUDatasets: {dataset_names}...")
 
     # --- Phase 1: Structural filtering ---
     for name in tqdm(dataset_names, desc="Phase 1 - structural filter"):
-        stats = fetch_dataset_stats(name, data_dir)
+        stats = fetch_dataset_stats(name, data_dir, feature_type=args.feature)
 
         if stats and stats["compatible"]:
             structurally_compatible.append(stats)
         else:
-            discarded_structural.append(name)
-            logger.info(f"Dataset '{name}' does not meet structural criteria. Cleaning up...")
+            if stats and stats.get("discard_reason") == "missing_features":
+                discarded_features.append(name)
+                logger.info(f"Dataset '{name}' discarded: per-graph features were selected, but dataset has 0 node features. Cleaning up...")
+            else:
+                discarded_structural.append(name)
+                logger.info(f"Dataset '{name}' does not meet structural criteria. Cleaning up...")
             cleanup_incompatible_dataset(name, data_dir)
 
     logger.info(
         f"Phase 1 done: {len(structurally_compatible)} datasets passed structural criteria, "
-        f"{len(discarded_structural)} discarded."
+        f"{len(discarded_structural)} discarded due to structural criteria, "
+        f"{len(discarded_features)} discarded due to missing node features."
     )
 
     if not args.run_benchmark:
         logger.info("GNN benchmark skipped as requested. Keeping all structurally compatible datasets.")
-        display_results(structurally_compatible, discarded_structural, [], ran_benchmark=False, min_f1=min_f1, feature_type=args.feature)
+        display_results(structurally_compatible, discarded_structural, [], discarded_features, ran_benchmark=False, min_f1=min_f1, feature_type=args.feature)
         return
 
     # --- Phase 2: GNN benchmark filtering ---
@@ -259,7 +284,7 @@ def main() -> None:
             )
             cleanup_incompatible_dataset(name, data_dir)
 
-    display_results(final_results, discarded_structural, discarded_f1, ran_benchmark=True, min_f1=min_f1, feature_type=args.feature)
+    display_results(final_results, discarded_structural, discarded_f1, discarded_features, ran_benchmark=True, min_f1=min_f1, feature_type=args.feature)
 
 
 if __name__ == "__main__":
