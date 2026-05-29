@@ -23,6 +23,7 @@ from src.data_utils import pytorch_to_networkx, networkx_to_igraph, DatasetPT
 from src.graph_analysis import analyze_single_graph, calculate_annd_error, calculate_moments_error, calculate_eccentricity_error
 from notebooks.visualization_utils import plot_graph, plot_annd, plot_eccentricity
 from src.anndg.graph_generator import generate_graph
+from src.generate_datasets import generate_graph as generate_graph_by_method
 
 
 
@@ -102,3 +103,76 @@ print(f"{'ANND Error':<25} | {annd_error:>12.4f}")
 print(f"{'Eccentricity Error':<25} | {ecc_error:>12.4f}")
 print(f"{'Diameter Error':<25} | {diameter_error:>12.4f}")
 print("="*70 + "\n")
+
+
+
+# Cell 3 - Multi-Generator Graph Comparison
+# Generate one synthetic graph per method and display alongside the original.
+METHODS = ["dummyNodes", "dummyEdges", "padma", "anndg", "anndgE"]
+METHOD_LABELS = {
+    "dummyNodes": "Dummy Nodes (ER-p)",
+    "dummyEdges": "Dummy Edges (GNM)",
+    "padma":      "PADMA",
+    "anndg":      "ANNDG",
+    "anndgE":     "ANNDG+Ecc",
+}
+
+rng_cmp = np.random.default_rng(seed=99887766)
+
+# Build target_stats once (reuse the already-computed one from Cell 2)
+target_stats_for_gen = dict(target_stats)
+target_stats_for_gen["observed_nx"] = GRAPH_NX  # needed by pdd / ergm (not used here)
+
+generated = {}  # method -> nx.Graph
+for method in METHODS:
+    try:
+        G_gen, _ = generate_graph_by_method(target_stats_for_gen, method=method, rng=rng_cmp)
+        generated[method] = G_gen
+    except Exception as exc:
+        print(f"[WARNING] {method} failed: {exc}")
+        generated[method] = nx.empty_graph(target_stats_for_gen.get("n_nodes", 1))
+
+# 2 rows x 3 cols: row 0 → dummyNodes, dummyEdges, padma | row 1 → anndg, anndgE, original
+fig, axes = plt.subplots(2, 3, figsize=(10, 6.5))
+fig.suptitle(
+    f"{DATASET} #{IDX} — Generator Comparison",
+    fontsize=14, fontweight="bold", y=0.98,
+)
+
+plot_order = ["dummyNodes", "dummyEdges", "padma", "anndg", "anndgE"]
+for ax, method in zip(axes.flat, plot_order):
+    G = generated[method]
+    label = METHOD_LABELS[method]
+    n, m = G.number_of_nodes(), G.number_of_edges()
+    plot_graph(graph=G, ax=ax, dataset_name=label, graph_index=IDX)
+    ax.set_title(f"{label}\n(n={n}, m={m})", fontsize=10)
+    
+    # Enclose graph in a beautiful frame (riquadro) and add margin/padding
+    ax.axis("on")
+    ax.set_xticks([])
+    ax.set_yticks([])
+    ax.margins(0.18)  # Leave room around nodes so graph looks smaller/well-framed
+    for spine in ax.spines.values():
+        spine.set_visible(True)
+        spine.set_color('#d3d3d3')
+        spine.set_linewidth(1.0)
+
+# Last cell: original graph
+ax_orig = axes.flat[-1]
+n_orig = GRAPH_NX.number_of_nodes()
+m_orig = GRAPH_NX.number_of_edges()
+plot_graph(graph=GRAPH_NX, ax=ax_orig, dataset_name=f"{DATASET} — Original", graph_index=IDX)
+ax_orig.set_title(f"Original\n(n={n_orig}, m={m_orig})", fontsize=10)
+
+# Enclose original graph in the same frame style
+ax_orig.axis("on")
+ax_orig.set_xticks([])
+ax_orig.set_yticks([])
+ax_orig.margins(0.18)
+for spine in ax_orig.spines.values():
+    spine.set_visible(True)
+    spine.set_color('#d3d3d3')
+    spine.set_linewidth(1.0)
+
+plt.tight_layout()
+plt.show()

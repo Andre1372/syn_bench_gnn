@@ -28,8 +28,8 @@ from notebooks.visualization_utils import add_baseline_guide, plot_performance_d
 # Exactly ONE of the three variables should be None at a time; the other two
 # must be set to a single valid string from the canonical orders below.
 FIXED_METHODS:  str | None = "anndgE"        # set to None to vary methods
-FIXED_SAMPLERS: str | None = "nosampler"     # set to None to vary samplers
-FIXED_FEATURES: str | None = None            # set to None to vary features
+FIXED_SAMPLERS: str | None = None    # set to None to vary samplers
+FIXED_FEATURES: str | None = "log_bin_deg"            # set to None to vary features
 
 RESULTS_DIR = PROJECT_ROOT / "results"
 DATASET_NAMES = [
@@ -73,6 +73,7 @@ def _canonical_order(values, order):
     """Return values sorted by canonical order, with unknown values appended."""
     present = set(values)
     return [v for v in order if v in present] + sorted(v for v in present if v not in order)
+
 
 def load_experiment_data() -> pd.DataFrame:
     """Loads and preprocesses main GNN evaluation data."""
