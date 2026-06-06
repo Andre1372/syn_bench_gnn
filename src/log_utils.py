@@ -1,13 +1,10 @@
-"""Utility module for configuration, telemetry logging, and output serialization."""
+"""Utility module for logging configuration."""
 
 from __future__ import annotations
 
-import csv
 import logging
 import sys
 from pathlib import Path
-
-import numpy as np
 
 logger = logging.getLogger(__name__)
 

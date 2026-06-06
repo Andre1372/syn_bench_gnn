@@ -168,13 +168,37 @@ class LogBinDegFeatureAssigner(GlobalFeatureAssigner):
 
     @classmethod
     def from_dataset(cls, dataset: list[Data], base: float = 2.0, min_tail_fraction: float = 0.01) -> "LogBinDegFeatureAssigner":
-        """Computes bin edges from a reference dataset and returns a fitted assigner."""
+        """Computes log-spaced bin edges from a reference dataset and returns a fitted assigner.
+
+        Args:
+            dataset: List of PyG Data objects used to fit the bin boundaries.
+            base: Logarithm base for the geometric bin progression (default: 2.0).
+            min_tail_fraction: Minimum fraction of total nodes that must fall in the
+                last bin; bins are merged if this threshold is not met.
+        Returns:
+            A :class:`LogBinDegFeatureAssigner` initialised with the computed bin edges.
+        """
         bin_edges = cls._compute_log_bin_edges(dataset, base=base, min_tail_fraction=min_tail_fraction)
         logger.info(f"LogBinDegFeatureAssigner: {len(bin_edges) - 1} bins computed from {sum(d.num_nodes for d in dataset)} nodes. Edges: {bin_edges[:-1]} + [inf]")
         return cls(bin_edges)
 
     @staticmethod
     def _compute_log_bin_edges(dataset: list[Data], base: float = 2.0, min_tail_fraction: float = 0.01) -> list[float]:
+        """Derives logarithmically-spaced bin edges from the degree distribution of a dataset.
+
+        Builds a geometric sequence of thresholds (``0, base^0, base^1, ...``) up to
+        the maximum observed degree, then prunes upper bins whose node count falls
+        below ``min_tail_fraction * total_nodes``.  The last edge is always
+        ``float('inf')`` so every degree is covered.
+
+        Args:
+            dataset: List of PyG Data objects whose node degrees are pooled.
+            base: Base of the geometric progression (default: 2.0).
+            min_tail_fraction: Minimum fraction of nodes required in the last bin
+                before pruning stops (default: 0.01).
+        Returns:
+            A sorted list of bin boundary floats with ``float('inf')`` as the last element.
+        """
         all_degrees: list[int] = []
         for data in dataset:
             if data.edge_index is not None and data.edge_index.numel() > 0:
@@ -212,6 +236,18 @@ class LogBinDegFeatureAssigner(GlobalFeatureAssigner):
 
     @staticmethod
     def _apply_log_bin_features(g: ig.Graph, bin_edges: list[float]) -> torch.Tensor:
+        """Converts node degrees of an igraph Graph to one-hot log-binned feature vectors.
+
+        Each node's degree is mapped to its bin index using ``torch.bucketize`` on
+        the upper boundaries, then one-hot encoded.
+
+        Args:
+            g: The igraph Graph whose node degrees are to be encoded.
+            bin_edges: Sorted bin boundaries (length ``n_bins + 1``); last element
+                must be ``float('inf')``.
+        Returns:
+            Float tensor of shape ``(num_nodes, n_bins)`` with one-hot rows.
+        """
         num_bins = len(bin_edges) - 1
         degrees = torch.tensor(g.degree(), dtype=torch.long)
         upper_edges = torch.tensor(bin_edges[1:], dtype=torch.float32)
@@ -329,13 +365,25 @@ class DegreeOrderedFeatureAssigner(PerGraphFeatureAssigner):
         return self._source_x.size(1)
 
     def _assign(self, degrees: torch.Tensor) -> torch.Tensor:
+        """Maps source feature rows to target nodes sorted by descending degree.
+
+        Nodes are ranked by degree (descending, stable). The highest-degree node
+        receives ``source_x[0]``, the next ``source_x[1]``, and so on. When the
+        target graph has more nodes than the source pool, surplus indices are
+        clamped to the last row of ``source_x``.
+
+        Args:
+            degrees: Long tensor of shape ``(num_nodes,)`` with each node's degree.
+        Returns:
+            Float tensor of shape ``(num_nodes, F)`` with reassigned features.
+        """
         num_nodes = degrees.size(0)
         pool_size = self._source_x.size(0)
         
         # Sort nodes by degree descending (stable=True keeps original order for ties)
         sorted_indices = torch.argsort(degrees, descending=True, stable=True)
         
-        # Indices in source_x to pick from
+        # Indices in source_x to pick from; clamped for surplus nodes
         source_indices = torch.arange(num_nodes).clamp(max=pool_size - 1)
         
         x = torch.empty((num_nodes, self._source_x.size(1)), dtype=self._source_x.dtype)
@@ -441,6 +489,18 @@ class NeighborDegreeOrderedFeatureAssigner(PerGraphFeatureAssigner):
         return idx[idx2]
 
     def _assign(self, sorted_indices: torch.Tensor) -> torch.Tensor:
+        """Maps source feature rows to target nodes using a pre-computed sorted order.
+
+        ``sorted_indices[0]`` is the highest-ranked node (highest degree / avg neighbour
+        degree) and receives ``source_x[0]``; subsequent nodes follow the same mapping.
+        Surplus nodes beyond the source pool size are clamped to the last row.
+
+        Args:
+            sorted_indices: Long tensor of shape ``(num_nodes,)`` giving the target
+                node indices in descending composite-key order.
+        Returns:
+            Float tensor of shape ``(num_nodes, F)`` with reassigned features.
+        """
         num_nodes = sorted_indices.size(0)
         pool_size = self._source_x.size(0)
         source_indices = torch.arange(num_nodes).clamp(max=pool_size - 1)
@@ -474,7 +534,7 @@ class NeighborDegreeOrderedFeatureAssigner(PerGraphFeatureAssigner):
 
 
 # ---------------------------------------------------------------------------
-# Registry (single source of truth for downstream smistamento)
+# Registry (single source of truth for downstream dispatch)
 # ---------------------------------------------------------------------------
 
 GLOBAL_ASSIGNERS: dict[str, type[GlobalFeatureAssigner]] = {

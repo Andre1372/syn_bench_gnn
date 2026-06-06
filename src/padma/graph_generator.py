@@ -18,13 +18,15 @@ logger = logging.getLogger(__name__)
 def _find_skewness_bounds(mean_norm: float, var_norm: float, n_nodes: int) -> tuple[float, float]:
     """Compute the feasible range of skewness for a bounded discrete distribution.
 
-    Uses the Pearson bounds for a distribution on [0, 1] with given mean and
-    variance.  The result is later scaled to the actual degree support.
+    Uses fixed conservative bounds of ``[-1, 1]``, further restricted to
+    ``[-sqrt(n_nodes), +sqrt(n_nodes)]`` to account for finite-sample limits.
+    The ``mean_norm`` and ``var_norm`` arguments are accepted for interface
+    consistency but are not used directly in the bound computation.
 
     Args:
-        mean_norm: Normalized mean degree in ``[0, 1]``.
-        var_norm: Normalized variance (must be positive).
-        n_nodes: Number of nodes (used to determine the integer support size).
+        mean_norm: Normalized mean degree in ``[0, 1]`` (unused in current implementation).
+        var_norm: Normalized variance (unused in current implementation).
+        n_nodes: Number of nodes, used to tighten bounds via ``±sqrt(n_nodes)``.
     Returns:
         ``(min_skew, max_skew)`` - feasible skewness bounds.
     """
@@ -32,16 +34,10 @@ def _find_skewness_bounds(mean_norm: float, var_norm: float, n_nodes: int) -> tu
     if std_norm < 1e-10:
         return 0.0, 0.0
 
-    # Skewness is equal to E[(X - mu)^3] / sigma^3
-    # Since (-mu) < (X - mu) < (1 - mu)
-    # E[skew] <= (1-mu) / sigma^3 * E[(X-mu)^2] = (1-mu) / sigma
-    # E[skew] >= (-mu) / sigma^3 * E[(X-mu)^2] = (-mu) / sigma
-    # min_skew = (-mean_norm) / std_norm
-    # max_skew = (1 - mean_norm) / std_norm
     min_skew = -1
     max_skew = 1
 
-    # Pearson's bound for finite samples
+    # Tighten bounds for finite samples using Pearson's finite-sample rule
     sqrt_n = np.sqrt(n_nodes)
     min_skew = max(min_skew, -sqrt_n)
     max_skew = min(max_skew, sqrt_n)
@@ -50,27 +46,24 @@ def _find_skewness_bounds(mean_norm: float, var_norm: float, n_nodes: int) -> tu
 
 
 def _find_kurtosis_bounds(mean_norm: float, var_norm: float, skewness: float, n_nodes: int) -> tuple[float, float]:
-    """Compute the feasible range of (excess) kurtosis given lower moments.
+    """Compute the feasible range of raw (non-excess) kurtosis given lower moments.
+
+    The lower bound follows the Pearson inequality ``kurt ≥ skew² + 1``.
+    The upper bound is capped at ``n_nodes`` as a finite-sample heuristic.
+    The ``mean_norm`` and ``var_norm`` arguments are accepted for interface
+    consistency but are not used directly in the bound computation.
 
     Args:
-        mean_norm: Normalized mean degree in ``[0, 1]``.
-        var_norm: Normalized variance.
-        skewness: Skewness of the distribution.
-        n_nodes: Number of nodes.
+        mean_norm: Normalized mean degree in ``[0, 1]`` (unused in current implementation).
+        var_norm: Normalized variance (unused in current implementation).
+        skewness: Skewness of the distribution, used to compute the lower bound.
+        n_nodes: Number of nodes, used as the upper bound cap.
     Returns:
         ``(min_kurt, max_kurt)`` - feasible raw (non-excess) kurtosis bounds.
     """
     # Pearson lower bound for raw kurtosis: kurt ≥ skew² + 1
     min_kurt = skewness ** 2 + 1.0
-
-    # Kurtosis is equal to E[(X - mu)^4] / sigma^4
-    # Since (X - mu)^2 <= max(mu^2, (1 - mu)^2)
-    # E[kurt] <= max(mu^2, (1 - mu)^2) / sigma^4 * E[(X-mu)^2]
-    # max_kurt = max(mean_norm**2, (1 - mean_norm)**2) / var_norm
-    max_kurt = float('inf')
-
-    # Upper bound for finite samples
-    max_kurt = min(max_kurt, n_nodes)
+    max_kurt = n_nodes
 
     return float(min_kurt), float(max_kurt)
 
@@ -145,17 +138,21 @@ def _generate_degree_sequence(
 ) -> np.ndarray:
     """Generate an integer degree sequence using `maxent_optimize_discrete`.
 
-    Converts normalized moments (computed on the ``[0,1]`` scale) to the
-    actual degree domain, calls the optimizer, and returns the resulting
-    sequence.
+    Converts normalized moments (on the ``[0, 1]`` scale) to the actual
+    degree domain ``[0, n-1]``, calls the max-entropy optimizer, and returns
+    an integer sample of length ``n_nodes``. Handles the zero-variance edge
+    case by returning a constant sequence equal to the rounded mean degree.
 
     Args:
         n_nodes: Number of nodes in the graph.
         mean_deg_norm: Mean degree normalized to ``[0, 1]``.
         var_deg_norm: Variance normalized to ``[0, 1]``.
-        skewness: Target skewness (real scale, not normalized).
-        kurtosis: Target raw kurtosis (≥ 1).
-        normalize_by_size: If ``True``, degrees are on the ``[0, n-1]`` scale; if ``False``, they remain on ``[0, 1]``.
+        skewness: Target skewness (non-normalized).
+        kurtosis: Target raw kurtosis (must be ≥ 1).
+        rng: NumPy random generator passed through to the optimizer.
+        normalize_by_size: If ``True`` (default), moments are rescaled from the
+            ``[0, 1]`` domain to the ``[0, n-1]`` degree domain. If ``False``,
+            the ``[0, 1]`` domain is used as-is.
     Returns:
         Integer degree sequence of length ``n_nodes``.
     """
@@ -209,24 +206,35 @@ def _generate_degree_sequence(
 # ---------------------------------------------------------------------------
 
 def generate_graph(target_stats: dict[str, Any], rng: np.random.Generator = None, normalize_by_size: bool = True, debug: bool = False) -> tuple[nx.Graph, dict]:
-    """Generate a synthetic graph matching the target statistics.
+    """Generate a synthetic graph whose degree distribution matches target statistics.
 
     Pipeline:
-        1. Extract target moments from stats.
-        2. Clamping/Bounds checking for higher-order moments.
-        3. Generate a max-entropy degree sequence.
-        4. Repair parity and Erdős-Gallai feasibility.
-        5. Build the graph with Havel-Hakimi (configuration_model fallback).
-        6. Randomize via double edge swaps.
+        1. Extract target moments (mean, variance, skewness, kurtosis) from ``target_stats``.
+        2. Clamp skewness and kurtosis to their feasible ranges.
+        3. Generate a max-entropy degree sequence via :func:`_generate_degree_sequence`.
+        4. Fix degree-sum parity and repair Erdős-Gallai feasibility.
+        5. Build a simple graph with Havel-Hakimi; fall back to ``configuration_model`` on failure.
+        6. Randomize edge placement via double-edge swaps.
 
     Args:
-        target_stats: Dictionary containing 'n_nodes' and 'degree_moments'.
-        rng: NumPy random generator.
-        normalize_by_size: If True, assumes moments were normalized on [0, 1] scale.
-        debug: If True, logs detailed diagnostics.
-
+        target_stats: Dictionary with keys ``'n_nodes'`` (int) and
+            ``'degree_moments'`` (sequence of up to four floats:
+            ``[mean_norm, var_norm, skewness, raw_kurtosis]``).
+        rng: NumPy random generator. A fresh default generator is created when
+            ``None`` is passed.
+        normalize_by_size: If ``True`` (default), interprets moments as
+            normalized on the ``[0, 1]`` scale and rescales them internally to
+            the ``[0, n-1]`` degree domain.
+        debug: If ``True``, emits ``logging.WARNING`` / ``logging.INFO``
+            messages with repair and diagnostics details.
     Returns:
-        A tuple (G_syn, info).
+        A tuple ``(G_syn, info)`` where ``G_syn`` is the generated
+        :class:`networkx.Graph` and ``info`` is a dictionary with keys:
+
+        - ``'target_moments'``: the (possibly clamped) input moments.
+        - ``'actual_moments'``: mean, variance, skewness, and raw kurtosis
+          measured on the realized degree sequence.
+        - ``'degree_seq'``: the integer degree sequence used to build the graph.
     """
     if rng is None:
         rng = np.random.default_rng()

@@ -45,31 +45,31 @@ _DEBUG_TARGET_ASSORTATIVITY: float = -0.2179
 # ---------------------------------------------------------------------------
 
 def _compute_annd_errors(actual_annd: np.ndarray, target_annd: np.ndarray) -> np.ndarray:
-    """Per-bin loss between the actual and target ANND profiles.
+    """Compute the per-bin ANND loss between the actual and target profiles.
 
     Args:
-        actual_annd: Current per-bin ANND values.
-        target_annd: Target per-bin ANND values.
+        actual_annd: Current per-bin normalized ANND values.
+        target_annd: Target per-bin normalized ANND values.
     Returns:
-        Array of per-bin objective values.
+        Array of per-bin loss values, shape ``(bins,)``.
     """
     return np.log1p(_ANND_LOSS_SCALE * np.abs(actual_annd - target_annd) ** _ANND_LOSS_EXPONENT)
 
 
 def _compute_eccentricity_errors(actual_ecc: np.ndarray, target_ecc: np.ndarray) -> np.ndarray:
-    """Per-bin loss between the actual and target eccentricity profiles.
+    """Compute the per-bin eccentricity loss between the actual and target profiles.
 
     Args:
-        actual_ecc: Current eccentricity values.
-        target_ecc: Target eccentricity values.
+        actual_ecc: Current per-bin normalized eccentricity values.
+        target_ecc: Target per-bin normalized eccentricity values.
     Returns:
-        Array of per-bin objective values.
+        Array of per-bin loss values, shape ``(bins,)``.
     """
     return np.log1p(_ECC_LOSS_SCALE * np.abs(actual_ecc - target_ecc) ** _ECC_LOSS_EXPONENT)
 
 
 def _combined_error(annd_errors: np.ndarray, ecc_errors: np.ndarray | None) -> float:
-    """Combine per-bin ANND and (optional) eccentricity errors into a single scalar."""
+    """Aggregate per-bin ANND and (optional) eccentricity errors into a scalar."""
     annd_mean = np.mean(annd_errors)
     if ecc_errors is None:
         return float(annd_mean)
@@ -85,7 +85,11 @@ def _combined_error(annd_errors: np.ndarray, ecc_errors: np.ndarray | None) -> f
 def _propose_double_edge_swap(graph_state: GraphState, rng: np.random.Generator) -> GraphChange | None:
     """Propose a uniformly random, degree-preserving double-edge swap.
 
-    Returns ``None`` when a valid proposal cannot be formed.
+    Samples two edges independently and proposes replacing them with two new
+    edges that reconnect the same four endpoints (randomly choosing between
+    the two possible pairings).  Returns ``None`` when fewer than two edges
+    exist or the chosen endpoints do not form a valid proposal (shared nodes
+    or proposed edges already present).
     """
     if graph_state.num_edges < 2:
         return None
@@ -121,9 +125,18 @@ def _propose_intelligent_double_edge_swap(
 ) -> GraphChange | None:
     """Propose a degree-preserving double-edge swap biased toward high-error bins.
 
-    Selects the first edge endpoint from the bin with the largest combined
-    deviation (ANND + optional eccentricity), then falls back to a fully random
-    edge if bin sampling fails.
+    **Part 1 – first edge (u, v):** the bin with the highest combined error
+    (ANND + optional eccentricity) is visited first.  With probability
+    ``_BIN_SELECTION_PROB`` a node *u* is sampled from that bin using
+    KNN-based filtering (see ``GraphState.get_random_node_from_bin``); if
+    sampling fails the next-highest-error bin is tried.  The last bin is
+    always tried unconditionally.  If every bin fails, a fully random edge is
+    used as fallback.
+
+    **Part 2 – second edge (x, y):** sampled uniformly at random.
+
+    **Part 3 – validity:** all four endpoints must be distinct and the two
+    proposed new edges must not already exist in the graph.
 
     Returns ``None`` when a valid proposal cannot be formed.
     """
@@ -184,23 +197,36 @@ def optimizer(
     rng: np.random.Generator | None = None,
     debug: bool = False,
 ) -> tuple[nx.Graph, dict]:
-    """Optimize a graph's ANND profile via simulated-annealing edge swaps.
+    """Optimize a graph's ANND profile via simulated-annealing double-edge swaps.
 
-    Iteratively proposes degree-preserving double-edge swaps and accepts or
-    rejects them according to a Metropolis criterion, minimising the weighted
-    distance between the graph's ANND (and optionally eccentricity) profile and
-    the supplied targets.
+    At each step an intelligent double-edge swap is proposed (biased toward
+    high-error bins) and accepted or rejected with the Metropolis criterion:
+
+    - Moves that strictly improve the *global* best error are always accepted
+      and update the best-state snapshot.
+    - Non-improving moves are accepted with probability
+      ``exp((best_error - proposed_error) / temperature)``.
+    - Temperature decays geometrically by ``cooling`` after every step.
+
+    The loop terminates early when:
+    - No valid proposal can be found after ``patience`` consecutive attempts.
+    - ``steps_without_improvement`` reaches ``patience``.
+    - The best error drops below ``_GOOD_ENOUGH_THRESHOLD``.
 
     Args:
-        initial_graph: Starting graph structure (``igraph`` format).
-        target_annd: Target ANND value for each degree bin.
-        target_eccentricity: Optional target eccentricity profile.
-        rng: Random-number generator; a fresh default RNG is used when ``None``.
-        debug: Print progress messages and plot the error trajectory.
+        initial_graph: Starting graph in ``igraph`` format.
+        target_annd: Target normalized ANND value for each degree bin.
+        target_eccentricity: Optional target eccentricity profile; when
+            provided, the eccentricity term is included in the objective.
+        rng: Random-number generator; a fresh default RNG is used when
+            ``None``.
+        debug: When ``True``, prints per-step progress messages and calls
+            ``_plot_optimization_trajectory`` after the loop.
     Returns:
-        A ``(graph, info)`` tuple where *graph* is the optimised ``nx.Graph``
-        and *info* is a dict with keys ``"best_error"``, ``"best_annd"``, and
-        (when *target_eccentricity* is given) ``"best_eccentricity"``.
+        A ``(graph, info)`` tuple where *graph* is the optimised
+        ``nx.Graph`` and *info* is a dict with keys ``"best_error"`` and
+        ``"best_annd"``, plus ``"best_eccentricity"`` when
+        *target_eccentricity* is supplied.
     """
     rng = rng or np.random.default_rng()
     target_annd = np.asarray(target_annd, dtype=float)
@@ -298,7 +324,7 @@ def optimizer(
 
         # Acceptance
         if proposed_error < best_state["error"]:
-            # Always accept strict improvements to the global best
+            # Accept: strict improvement to the global best — always keep.
             current_error = proposed_error
             current_annd = proposed_annd
             current_ecc = proposed_ecc
@@ -307,13 +333,14 @@ def optimizer(
             if debug:
                 print(f"Improvement at step {step}: error = {current_error:.4f}, annd = {current_annd}")
         elif rng.random() < np.exp((best_state["error"] - proposed_error) / temperature):
-            # Accept a non-improving move (exploration)
+            # Metropolis criterion: accept a non-improving move for exploration.
             current_error = proposed_error
             current_annd = proposed_annd
             current_ecc = proposed_ecc
             steps_without_improvement += 1
         else:
-            # Reject: revert graph and restore the pre-change knn_norm snapshot (no extra KNN call).
+            # Reject: revert graph and restore pre-change knn_norm to avoid
+            # a redundant KNN call on the next step.
             graph_state.revert_change(change)
             _knn_norm = prev_knn_norm
             steps_without_improvement += 1
@@ -349,7 +376,12 @@ def optimizer(
 # ---------------------------------------------------------------------------
 
 def _plot_optimization_trajectory(errors_history: list[float], assortativity_errors_history: list[float]) -> None:
-    """Plot the objective-function and assortativity-error trajectories."""
+    """Plot the objective-function and assortativity-error trajectories.
+
+    Draws the combined ANND (± eccentricity) error on the left y-axis in blue
+    and, when *assortativity_errors_history* is non-empty, the absolute
+    assortativity error on a secondary right y-axis in red.
+    """
     fig, ax1 = plt.subplots(figsize=(10, 6))
 
     ax1.plot(errors_history, color="#2563eb", linewidth=1.5, label="Objective Function")

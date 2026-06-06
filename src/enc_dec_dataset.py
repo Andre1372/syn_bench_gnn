@@ -1,8 +1,4 @@
-"""Module for encoding and decoding graph features using statistical approaches.
-
-This module provides an abstraction for feature encoding/decoding and a specific
-implementation based on statistical moments.
-"""
+"""Feature encoding/decoding for distributional graph-statistics sampling."""
 
 from __future__ import annotations
 
@@ -29,7 +25,16 @@ class FeatureEncoderDecoder(ABC):
     """
 
     def __init__(self, num_classes: int, is_discrete: np.ndarray, rng: np.random.Generator | None = None) -> None:
-        """Initializes the encoder with a random generator."""
+        """Initializes common state shared by all encoder-decoder subclasses.
+
+        Args:
+            num_classes: Number of classes in the dataset; controls the size of
+                the per-class storage lists.
+            is_discrete: Boolean array of shape ``(num_features,)`` indicating
+                which statistics should be treated as discrete integers.
+            rng: NumPy random Generator used for all stochastic operations.
+                A fresh generator is created when *None* is passed.
+        """
         self.rng = rng if rng is not None else np.random.default_rng()
         self._encodings: list[np.ndarray | None] = [None] * num_classes
         self._corr_matrices: list[np.ndarray | None] = [None] * num_classes
@@ -37,11 +42,17 @@ class FeatureEncoderDecoder(ABC):
         self._is_discrete: np.ndarray = np.delete(is_discrete, 1)
 
     def encode_features(self, stat_matrix: np.ndarray, class_id: int) -> None:
-        """Encodes multiple features into compact representations and stores them for a class.
+        """Encodes the per-class statistics matrix and stores the result internally.
+
+        Before delegating to :meth:`_encode_features`, this method pre-processes
+        the raw statistics matrix: it un-normalises the degree mean (col 2) and
+        variance (col 3) by multiplying by ``N-1`` and ``(N-1)^2`` respectively,
+        and drops the redundant ``n_edges`` column (col 1).
 
         Args:
-            stat_matrix: Matrix of shape (num_samples, num_features).
-            class_id: The ID of the class being encoded.
+            stat_matrix: Raw statistics matrix of shape ``(num_samples, num_features)``
+                as produced by the preprocessing pipeline (with n_edges at col 1).
+            class_id: Zero-based index of the class being encoded.
         """
         working_matrix = stat_matrix.astype(float).copy()
         
@@ -55,13 +66,19 @@ class FeatureEncoderDecoder(ABC):
         self._encode_features(np.delete(working_matrix, 1, axis=1), class_id)
 
     def sample_features(self, num_samples: int, class_id: int) -> np.ndarray:
-        """Samples synthetic feature values from the stored representations of a class.
+        """Samples synthetic statistics from the stored representation of a class.
+
+        Delegates to :meth:`_sample_features` (which works in the reduced internal
+        space without n_edges), then post-processes: it derives ``n_edges`` from
+        the sampled ``avg_degree`` and ``n_nodes``, re-normalises the degree mean
+        and variance, and inserts n_edges back at col 1.
 
         Args:
             num_samples: Number of synthetic samples to generate.
-            class_id: The ID of the class to sample from.
+            class_id: Zero-based index of the class to sample from.
         Returns:
-            Matrix of shape (num_samples, num_features).
+            Matrix of shape ``(num_samples, num_features)`` in the same column
+            layout as the original ``stat_matrix`` passed to :meth:`encode_features`.
         """
         samples = self._sample_features(num_samples, class_id)
         
@@ -712,16 +729,27 @@ class GMCMEncoderDecoder(FeatureEncoderDecoder):
     def load_embedding(self, embedding: np.ndarray, class_id: int) -> bool:
         """Loads a flattened embedding vector for a class to enable sampling.
 
-        Validates the embedding semantics before storing it:
-        - Percentile values respect per-feature lower bounds and are monotone.
-        - GMM weights are positive and sum to 1.
-        - GMM covariance matrices are corrected to be PSD if needed.
+        Validates the embedding before committing:
+
+        - Percentile matrix must satisfy :meth:`_check_percentile_matrix`.
+        - GMM weights are normalised via softmax so arbitrary real-valued inputs
+          are converted to a valid probability distribution.
+        - GMM means are checked for finiteness (they live in latent normal space,
+          so no domain bounds apply).
+        - Each covariance matrix is symmetrised and projected onto the nearest
+          positive-semi-definite matrix (eigenvalue clipping at 1e-6).
+        - Precision-Cholesky factors are computed for use by scikit-learn's GMM
+          sampler.
 
         Args:
-            embedding: Flattened 1D numpy array of (percentiles, weights, means, cov_triu).
-            class_id: The ID of the class to load the embedding for.
+            embedding: Flattened 1D numpy array with layout
+                ``[percentiles_flat | weights | means_flat | cov_triu_flat]``.
+            class_id: Zero-based index of the class to load the embedding for.
         Returns:
-            True on success, False if semantic validation fails.
+            True on success, False if the percentile or mean validation fails.
+        Raises:
+            ValueError: If ``class_id`` is out of range or the embedding size is
+                inconsistent with the configured number of features and components.
         """
         import scipy.linalg
 

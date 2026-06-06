@@ -1,4 +1,4 @@
-"""Module defining foundational data structures for graph manipulation."""
+"""Foundational data structures for graph state management in ANNDG."""
 
 from dataclasses import dataclass
 import numpy as np
@@ -18,7 +18,13 @@ class GraphChange:
 
 
 class GraphState:
-    """Capsulates the graph state allowing O(1) local operations."""
+    """Maintains the current graph state and supports O(1) local operations.
+
+    Internally the class keeps a canonical edge list alongside an adjacency
+    list and a reverse index so that random-edge sampling and edge removal are
+    both O(1).  The active nodes are sorted by initial degree and split into
+    a fixed set of bins used for ANND aggregation.
+    """
 
     def __init__(self, graph: ig.Graph, bins: int) -> None:
         """Initializes the GraphState.
@@ -41,6 +47,8 @@ class GraphState:
         self._edges: list[tuple[int, int]] = []
         self._edge_to_idx: dict[tuple[int, int], int] = {} # map from edge to index in _edges (used for O(1) edge removal)
         
+        # Build adjacency list and canonical (min, max) edge list with a
+        # reverse index so that edge removal is O(1) via swap-and-pop.
         for u, v in graph.get_edgelist():
             self._adj_list[u].add(v)
             self._adj_list[v].add(u)
@@ -52,12 +60,14 @@ class GraphState:
         degrees = np.array(graph.degree(), dtype=int)
         self._num_active_nodes: int = int(np.count_nonzero(degrees))
         
-        # Fix the binning permutation at initialization for consistency.
-        # We only bin nodes that are active (degree > 0).
+        # Fix the binning permutation at initialization so that bin membership
+        # is stable throughout the optimization.  Only active nodes (degree > 0)
+        # are assigned to bins; isolated nodes are excluded.
         if self._num_active_nodes > 0:
             active_mask = degrees > 0
             active_indices = np.where(active_mask)[0]
-            # Sort active indices by their initial degree
+            # Sort active nodes by their initial degree so that bins group
+            # nodes of similar degree together.
             self._fixed_active_indices = active_indices[np.argsort(degrees[active_mask])]
         else:
             self._fixed_active_indices = np.array([], dtype=int)
@@ -103,18 +113,27 @@ class GraphState:
         knn_normalized: np.ndarray | None = None,
     ) -> int | None:
         """
-        Samples a node from a specific bin in O(1) time, with optional KNN-based filtering.
+        Sample a node uniformly at random from the specified bin in O(1) time.
+
+        When *current_value*, *target_value*, and *knn_normalized* are all
+        provided, the sample is restricted to nodes whose individual normalized
+        KNN value would move the bin mean in the direction of the target:
+        - If ``current_value < target_value``, only nodes with KNN ≤
+          ``current_value`` are eligible (they pull the bin average up).
+        - If ``current_value >= target_value``, only nodes with KNN ≥
+          ``current_value`` are eligible (they pull the bin average down).
+        If the resulting candidate set is empty, ``None`` is returned.
 
         Args:
             bin_idx: The index of the bin to sample from.
             rng: The random number generator to use.
-            current_value: Current ANND value for this bin (normalized).
-            target_value: Target ANND value for this bin (normalized).
-            knn_normalized: Pre-computed per-node normalized KNN values, as returned
-                by ``get_annd()``. When provided together with ``current_value`` and
-                ``target_value``, avoids a redundant KNN computation.
+            current_value: Current normalized ANND mean for this bin.
+            target_value: Target normalized ANND mean for this bin.
+            knn_normalized: Per-node normalized KNN array as returned by
+                ``get_annd()``.  Required for conditional filtering.
         Returns:
-            The index of the sampled node, or None if the bin is empty or no node satisfies the condition.
+            The index of the sampled node, or ``None`` if the bin is empty or
+            no node satisfies the filtering condition.
         Raises:
             ValueError: If the bin index is out of range.
         """
@@ -123,14 +142,16 @@ class GraphState:
 
         bin_nodes = self._bin_indices[bin_idx]
 
-        # Apply conditional filtering if all required parameters are provided.
+        # Apply conditional filtering if all three parameters are provided.
         if current_value is not None and target_value is not None and knn_normalized is not None:
             bin_knn = knn_normalized[bin_nodes]
             if current_value < target_value:
-                # current < target → sample nodes that pull the average down
+                # current < target → restrict to nodes whose KNN is below the
+                # current mean; including them in a swap will raise the average.
                 mask = bin_knn <= current_value
             else:
-                # current > target → sample nodes that pull the average up
+                # current > target → restrict to nodes whose KNN is above the
+                # current mean; including them in a swap will lower the average.
                 mask = bin_knn >= current_value
 
             bin_nodes = bin_nodes[mask]
@@ -142,14 +163,17 @@ class GraphState:
         return int(bin_nodes[idx])
 
     def get_annd(self) -> tuple[np.ndarray, np.ndarray]:
-        """Computes the ANND profile for the graph.
+        """Compute the binned ANND profile and per-node normalized KNN values.
 
         Returns a pair ``(binned_annd, knn_normalized)`` where:
-        - ``binned_annd`` is a per-bin mean of the normalized ANND (shape ``(bins,)``).
-        - ``knn_normalized`` is the per-node normalized KNN value (shape ``(num_nodes,)``).
+        - ``binned_annd`` is the per-bin mean of the normalized KNN values
+          (shape ``(bins,)``).  Each entry is the mean of
+          ``knn_raw[bin_nodes] / (num_nodes - 1)`` over the nodes in that bin.
+        - ``knn_normalized`` is the per-node normalized KNN array
+          (shape ``(num_nodes,)``), equal to ``knn_raw / (num_nodes - 1)``.
 
-        Returning both avoids a second KNN computation when the caller also needs
-        per-node values (e.g. for ``get_random_node_from_bin`` filtering).
+        Returning both values avoids a redundant KNN computation when the
+        caller (e.g. ``get_random_node_from_bin``) also needs per-node values.
         """
         if self._num_nodes == 0: return np.zeros(self._bins, dtype=float), np.zeros(0, dtype=float)
         if self._num_active_nodes <= 1: return np.zeros(self._bins, dtype=float), np.zeros(self._num_nodes, dtype=float)
@@ -159,7 +183,7 @@ class GraphState:
         norm_factor = self._num_nodes - 1
         knn_normalized = knn_raw / norm_factor if norm_factor > 0 else knn_raw
 
-        # Per-bin mean of normalized KNN values
+        # Per-bin mean: compute knn_raw[bin_nodes].mean() and then normalise.
         binned_annd = np.array([
             knn_raw[indices].mean() / norm_factor if indices.size > 0 else 0.0
             for indices in self._bin_indices
@@ -168,29 +192,47 @@ class GraphState:
         return binned_annd, knn_normalized
 
     def get_eccentricity(self) -> np.ndarray:
-        """
-        Computes the eccentriciy value for each node in the graph, normalizes it and bins it into percentiles.
+        """Compute the normalized, binned eccentricity profile of the graph.
+
+        Eccentricities are derived from the all-pairs shortest-path matrix.
+        Unreachable node pairs (infinite distance) are treated as if the
+        maximum finite distance were zero, by replacing ``inf`` with ``-1``
+        before taking the row-wise maximum — effectively making those nodes
+        contribute a negative eccentricity that is still dominated by any
+        positive finite distance.  Each bin value is the mean eccentricity of
+        its member nodes divided by ``(num_nodes - 1)``.
+
+        Returns:
+            Array of shape ``(bins,)`` with the normalized mean eccentricity
+            per bin.  Returns an all-zero array when the graph has no nodes or
+            fewer than two active nodes.
         """
         if self._num_nodes == 0: return np.zeros(self._bins, dtype=float)
         if self._num_active_nodes <= 1: return np.zeros(self._bins, dtype=float)
         
         dists = np.array(self.get_graph().distances(), dtype=float)
-        # Mask out infinity (unreachable paths) by replacing them with -1.0
+        # Replace inf (unreachable pairs) with -1 so they don't inflate
+        # eccentricities for disconnected graphs.
         finite_dists = np.where(np.isinf(dists), -1.0, dists)
         eccentricities = np.max(finite_dists, axis=1)
 
         ecc_raw = np.array(eccentricities, dtype=float)
         norm_factor = (self._num_nodes - 1)
 
-        # Calculate mean for each fixed group of nodes using pre-calculated indices
+        # Calculate the mean eccentricity for each bin using the fixed indices.
         return np.array([
             ecc_raw[indices].mean() / norm_factor if indices.size > 0 else 0.0 
             for indices in self._bin_indices
         ], dtype=float)
 
     def copy(self) -> 'GraphState':
-        """Creates a deep copy of the current state."""
-        # Use simple creation to avoid GraphState.__init__ overhead
+        """Return a deep copy of the current graph state.
+
+        Uses ``object.__new__`` to bypass ``__init__`` and copies each
+        internal field directly, avoiding the overhead of rebuilding the
+        adjacency structures from an igraph object.
+        """
+        # Bypass __init__ to avoid redundant validation and reconstruction.
         new_state = object.__new__(GraphState)
         new_state._num_nodes = self._num_nodes
         new_state._num_edges = self._num_edges
@@ -204,12 +246,18 @@ class GraphState:
         return new_state
 
     def apply_change(self, change: GraphChange) -> None:
-        """Applies a graph change to the internal state updating all internal variables.
+        """Apply a graph change, updating all internal data structures.
+
+        Edges are added and removed from the adjacency list, the canonical
+        edge list, and the reverse index.  Removal uses swap-and-pop to keep
+        the edge list compact and the reverse index consistent.
 
         Args:
-            change: The GraphChange object defining edges to add and remove.
+            change: The ``GraphChange`` object defining edges to add and remove.
+                Passing ``None`` is a no-op.
         Raises:
-            ValueError: If attempting to add an existing edge or remove a non-existent edge.
+            ValueError: If a self-loop is attempted, if an edge to add already
+                exists, or if an edge to remove does not exist.
         """
         if change is None: return
 
@@ -242,20 +290,26 @@ class GraphState:
             idx_to_remove = self._edge_to_idx.pop(edge)
             last_edge = self._edges[-1]
             if idx_to_remove < len(self._edges) - 1:
-                # Update last edge position
+                # Swap-and-pop: replace the removed edge's slot with the last edge
+                # and update the reverse index accordingly.
                 self._edges[idx_to_remove] = last_edge
                 self._edge_to_idx[last_edge] = idx_to_remove
             self._edges.pop()
 
     def revert_change(self, change: GraphChange) -> None:
-        """Reverts a previously applied graph change.
-        
+        """Revert a previously applied graph change.
+
+        Internally builds an inverted ``GraphChange`` (swapping
+        ``edges_to_add`` and ``edges_to_remove``) and delegates to
+        ``apply_change``.
+
         Args:
-            change: The GraphChange object to revert.
+            change: The ``GraphChange`` object to revert.  Passing ``None``
+                is a no-op.
         """
         if change is None: return
 
-        # Simple revert by swapping add/remove
+        # Invert the change by swapping add/remove lists, then reuse apply_change.
         inverted_change = GraphChange(
             edges_to_add=change.edges_to_remove,
             edges_to_remove=change.edges_to_add

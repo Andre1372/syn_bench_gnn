@@ -12,18 +12,13 @@ from sklearn.model_selection import train_test_split
 from torch_geometric.data import Data, InMemoryDataset
 from torch_geometric.loader import DataLoader
 from torch_geometric.datasets import TUDataset
-from torch_geometric.utils import to_undirected
 
 from src.node_features import (
     NodeFeatureAssigner,
     GlobalFeatureAssigner,
     ConstantFeatureAssigner,
     LogBinDegFeatureAssigner,
-    RandomSampleFeatureAssigner,
-    DegreeOrderedFeatureAssigner,
-    NeighborDegreeOrderedFeatureAssigner,
     is_per_graph_strategy,
-    node_feature_assigner_from_metadata,
     ALL_FEATURE_TYPES,
 )
 
@@ -40,8 +35,8 @@ class _PerGraphMetadataSentinel:
     Per-graph assigners (``random_sample``, ``degree_ordered``, …) keep the
     original TUDataset features as-is and do not transform the data_list. We
     still need something with ``.in_dim`` and ``.to_metadata()`` to produce the
-    ``.pt`` metadata payload, so we use this tiny object instead of a dynamically
-    generated anonymous type.
+    ``.pt`` metadata payload, so we use this tiny placeholder object instead of
+    a dynamically generated anonymous type.
 
     Args:
         feature_type: The ``FEATURE_TYPE`` string of the per-graph strategy.
@@ -117,7 +112,9 @@ def sample_dataset(dataset: list[Data], max_size: int, rng: np.random.Generator 
     If the dataset already has at most ``max_size`` graphs it is returned
     unchanged.  Otherwise the sample is built via **stratified** selection:
 
-    1. The per-class quota is proportional to the original class frequencies.
+    1. The per-class quota is proportional to the original class frequencies;
+       remaining slots are awarded to the classes with the largest fractional
+       parts (largest-remainder method).
     2. Within each class, candidate graphs are ranked by ascending number of
        nodes. Indices are chosen at uniformly-spaced positions along that
        rank so that the sampled node-count histogram mirrors the full-class
@@ -126,9 +123,10 @@ def sample_dataset(dataset: list[Data], max_size: int, rng: np.random.Generator 
     Args:
         dataset: A list of PyG ``Data`` objects.
         max_size: Maximum number of graphs to keep.
-        rng: NumPy random Generator used only to break rank ties deterministically.  If *None* a fresh generator is created.
+        rng: NumPy random Generator used only to break rank ties deterministically.
+            If *None* a fresh generator is created.
     Returns:
-        A (possibly shorted) list of ``Data`` objects.
+        A (possibly shorter) list of ``Data`` objects.
     """
     if len(dataset) <= max_size: return dataset
 
@@ -262,9 +260,18 @@ def unflatten_stats(flat_arr: np.ndarray, structure: dict[str, int]) -> dict[str
 
 
 def get_target_stats(dataset_obj: DatasetPT, idx: int) -> dict[str, Any]:
-    """Retrieves target statistics (nodes, edges, moments) for a graph from .pt metadata.
-    
-    If metadata is unavailable, raises error.
+    """Retrieves per-graph topology statistics for a single graph from the dataset metadata.
+
+    Args:
+        dataset_obj: A :class:`DatasetPT` whose ``metadata`` contains a
+            ``'per_graph_statistics'`` list populated by the preprocessing pipeline.
+        idx: Zero-based index of the graph whose statistics should be returned.
+    Returns:
+        A dictionary with keys ``'n_nodes'``, ``'n_edges'``, ``'diameter'``,
+        ``'degree_moments'``, ``'annd'``, and ``'eccentricity'``.
+    Raises:
+        ValueError: If ``per_graph_statistics`` is absent from the metadata, or
+            if ``idx`` exceeds the length of that list.
     """
     metadata = dataset_obj.metadata
     orig_per_graph_stats = metadata.get("per_graph_statistics", [])
@@ -551,19 +558,19 @@ def pytorch_to_igraph(data: Data) -> ig.Graph:
 
 
 def igraph_to_pytorch(g: ig.Graph, y: torch.Tensor, assigner: NodeFeatureAssigner | None = None, bin_edges: list[float] | None = None) -> Data:
-    """Converts an igraph Graph back to a PyG Data object.
+    """Converts an igraph Graph to a PyG Data object, assigning node features.
 
     Args:
-        g: The igraph Graph.
-        y: Target label for the graph.
+        g: The source igraph Graph (assumed undirected and simple).
+        y: Target label tensor for the graph.
         assigner: A :class:`~src.node_features.NodeFeatureAssigner` instance that
             controls node feature assignment.  When *None* and ``bin_edges`` is also
-            *None*, all-ones dummy features are used.
+            *None*, a :class:`ConstantFeatureAssigner` (all-ones features) is used.
         bin_edges: **Deprecated** — pass a :class:`LogBinDegFeatureAssigner` via
             ``assigner`` instead.  When provided without ``assigner``, a temporary
             :class:`LogBinDegFeatureAssigner` is constructed from ``bin_edges``.
     Returns:
-        A PyG Data object.
+        A PyG Data object with node features set by the assigner.
     """
     if assigner is None:
         if bin_edges:
@@ -576,13 +583,17 @@ def igraph_to_pytorch(g: ig.Graph, y: torch.Tensor, assigner: NodeFeatureAssigne
 def networkx_to_pytorch(nx_graph: nx.Graph, y: torch.Tensor, assigner: NodeFeatureAssigner | None = None, bin_edges: list[float] | None = None) -> Data:
     """Converts a NetworkX graph directly to a PyG Data object.
 
+    Converts the graph to igraph first, then delegates to :func:`igraph_to_pytorch`.
+
     Args:
         nx_graph: The source NetworkX graph.
-        y: Target label for the graph.
-        assigner: A :class:`~src.node_features.NodeFeatureAssigner` forwarded to :func:`igraph_to_pytorch`.
-        bin_edges: **Deprecated** — use ``assigner`` instead.
+        y: Target label tensor for the graph.
+        assigner: A :class:`~src.node_features.NodeFeatureAssigner` forwarded to
+            :func:`igraph_to_pytorch` for node feature assignment.
+        bin_edges: **Deprecated** — pass a :class:`LogBinDegFeatureAssigner` via
+            ``assigner`` instead.
     Returns:
-        A PyG Data object.
+        A PyG Data object with node features set by the assigner.
     """
     return igraph_to_pytorch(networkx_to_igraph(nx_graph), y, assigner=assigner, bin_edges=bin_edges)
 

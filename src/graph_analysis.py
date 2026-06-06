@@ -1,5 +1,6 @@
+"""Graph analysis utilities: per-graph and aggregate topology statistics."""
+
 import logging
-from collections import defaultdict
 
 import igraph as ig
 import numpy as np
@@ -79,13 +80,16 @@ def per_graph_statistics(data_list: list[Data], precomputed_stats: list[dict[str
 
 
 def analyze_single_graph(graph: ig.Graph) -> dict[str, float]:
-    """Computes a comprehensive set of network statistics for a single graph.
+    """Computes a comprehensive set of topological statistics for a single graph.
 
     Args:
         graph: The igraph.Graph to analyze.
     Returns:
-        A dictionary containing absolute values for modularity, clustering,
-        assortativity, degree moments (1-4), and motif counts (size 3-4).
+        A dictionary with keys: ``'n_nodes'``, ``'n_edges'``, ``'modularity'``,
+        ``'clustering'``, ``'assortativity'``, ``'efficiency'``, ``'diameter'``,
+        ``'degree_moments'`` (array of 4 normalised moments), ``'annd'``
+        (binned average nearest-neighbour degree), and ``'eccentricity'``
+        (binned normalised eccentricity).
     """
     deg_moments = count_deg_moments(graph)
     motifs = count_motifs(graph, k=4)
@@ -121,10 +125,17 @@ def analyze_single_graph(graph: ig.Graph) -> dict[str, float]:
 # ------------------------------------------------------------------
 
 def count_deg_moments(graph: ig.Graph) -> np.ndarray:
-    """Computes the first n moments of the graph's degree distribution.
-    
+    """Computes the first four moments of the graph's normalised degree distribution.
+
+    Node degrees are normalised by ``max(N-1, 1)`` before moment computation.
+    Skewness and kurtosis are set to 0 and 3 respectively when the degree
+    variance is negligible (< 1e-10), avoiding numerical instability.
+
+    Args:
+        graph: The igraph.Graph to analyze.
     Returns:
-        NumPy array [mean, variance, skewness, kurtosis].
+        A NumPy array ``[mean, variance, skewness, Pearson_kurtosis]`` of the
+        normalised degree distribution. Returns ``np.zeros(4)`` for empty graphs.
     """
     n = graph.vcount()
     degrees = np.array(graph.degree(), dtype=float)
@@ -148,21 +159,26 @@ def count_deg_moments(graph: ig.Graph) -> np.ndarray:
 
 
 def calculate_annd(graph: ig.Graph, bins: int = 4, bin_indices: list[np.ndarray] | None = None) -> tuple[np.ndarray, list[np.ndarray]]:
-    """
-    Computes the Average Nearest Neighbor Degree (ANND) for each node in the graph, normalizes it and bins it into percentiles.
+    """Computes the binned, normalised Average Nearest-Neighbour Degree (ANND).
 
-    ANND characterizes degree-degree correlations. The function normalizes neighbor degrees 
-    by the maximum possible degree (N-1) and aggregates nodes into 'bins' percentile groups 
-    based on their degree rank.
+    Nodes are ranked by degree and split into ``bins`` equal-sized groups.
+    Within each bin the mean raw ANND is computed and then divided by ``N-1``
+    to normalise into [0, 1].  Isolated nodes (degree 0) are excluded from
+    binning.  If ``bin_indices`` is supplied the binning step is skipped.
 
     Args:
         graph: The igraph.Graph object to analyze.
-        bins: The number of percentile bins to aggregate into.
-        bin_indices: Optional pre-calculated list of node indices per bin.
+        bins: Number of degree-rank percentile bins to aggregate into.
+        bin_indices: Optional pre-computed list of node-index arrays (one per
+            bin) as returned by a previous call to this function.  When
+            provided the degree-sorting and array-split steps are skipped.
     Returns:
-        tuple[np.ndarray, list[np.ndarray]]: 
-            - Array of length `bins` containing the mean normalized ANND per bin.
-            - List containing for each bin the indices of the active nodes associated with that bin.
+        A tuple ``(annd_bins, bin_indices)`` where:
+
+        - ``annd_bins`` — float array of length ``bins`` with the mean
+          normalised ANND per bin.
+        - ``bin_indices`` — list of index arrays (one per bin) of the active
+          nodes that were used to compute each bin.
     """
     n_nodes = graph.vcount()
     if n_nodes == 0:
@@ -212,20 +228,28 @@ def calculate_annd(graph: ig.Graph, bins: int = 4, bin_indices: list[np.ndarray]
 
 
 def calculate_eccentricity(graph: ig.Graph, bins: int = 4, bin_indices: list[np.ndarray] | None = None) -> tuple[np.ndarray, list[np.ndarray]]:
-    """
-    Computes the eccentriciy value for each node in the graph, normalizes it and bins it into percentiles.
+    """Computes the binned, normalised node eccentricity.
 
-    Eccentricity is the maximum shortest path distance from a node to any 
-    other node in the graph: e(u) = max_{v \in V} d(u, v). 
+    Eccentricity ``e(u) = max_{v in V} d(u, v)`` is computed for every node
+    via the all-pairs distance matrix.  Unreachable pairs (infinite distance)
+    are treated as ``-1`` so they do not inflate the maximum.  Nodes are then
+    ranked by degree, split into ``bins`` equal groups, and the mean raw
+    eccentricity within each bin is divided by ``N-1`` to normalise into [0, 1].
+    Isolated nodes (degree 0) are excluded from binning.  If ``bin_indices``
+    is supplied the binning step is skipped.
 
     Args:
         graph: The igraph.Graph object to analyze.
-        bins: The number of percentile bins to aggregate into.
-        bin_indices: Optional pre-calculated list of node indices per bin.
+        bins: Number of degree-rank percentile bins to aggregate into.
+        bin_indices: Optional pre-computed list of node-index arrays (one per
+            bin) as returned by :func:`calculate_annd`.  When provided the
+            degree-sorting and array-split steps are skipped.
     Returns:
-        tuple[np.ndarray, list[np.ndarray]]: 
-            - Array of length `bins` containing the mean normalized eccentricity per bin.
-            - List containing for each bin the indices of the nodes associated with that bin.
+        A tuple ``(ecc_bins, bin_indices)`` where:
+        - ``ecc_bins`` — float array of length ``bins`` with the mean
+          normalised eccentricity per bin.
+        - ``bin_indices`` — list of index arrays (one per bin) of the active
+          nodes that were used to compute each bin.
     """
     n_nodes = graph.vcount()
     if n_nodes == 0:
@@ -418,18 +442,20 @@ def calculate_diameter(graph: ig.Graph) -> float:
 
 
 def calculate_moments_error(obtained_moments: np.ndarray, target_moments: np.ndarray) -> float:
-    """Calculates the structural error between obtained degree moments and target moments.
-    
-    Inspired by Padma's maxent objective:
-    - Uses relative error with symmetric scaling: scale = min(|actual|, |target|) + 1e-6.
-    - Error metric: log1p(abs_diff / scale) ** 2.5.
-    - Aggregates variance, skewness, and kurtosis losses using an L2 norm.
-    
+    """Calculates the structural error between obtained and target degree moments.
+
+    The loss for each moment is ``|arcsinh(actual) - arcsinh(target)| ** 1.5``.
+    Skewness is included only when the obtained variance exceeds 1e-12 (to
+    avoid numerical instability on near-constant degree sequences).  The final
+    scalar is the RMS (L2 norm / sqrt(n)) of the individual moment losses.
+
     Args:
-        obtained_moments: NumPy array [mean, variance, skewness, kurtosis].
-        target_moments: NumPy array [mean, variance, skewness, kurtosis].
+        obtained_moments: NumPy array ``[mean, variance, skewness, kurtosis]``
+            of the generated graph's degree distribution.
+        target_moments: NumPy array ``[mean, variance, skewness, kurtosis]``
+            of the reference graph's degree distribution.
     Returns:
-        A scalar error value representing the discrepancy in degree moments.
+        A non-negative scalar representing the moment discrepancy.
     """
     moment_losses = []
 
@@ -463,13 +489,16 @@ def calculate_moments_error(obtained_moments: np.ndarray, target_moments: np.nda
 
 
 def calculate_annd_error(obtained_annd: np.ndarray, target_annd: np.ndarray) -> float:
-    """Calculates the structural error between obtained ANND and target ANND.
-    
+    """Calculates the error between the obtained and target binned ANND vectors.
+
+    Uses the element-wise loss ``log1p(40 * |obtained - target| ** 1.5)``
+    averaged across all bins.
+
     Args:
-        obtained_annd: NumPy array of obtained ANND.
-        target_annd: NumPy array of target ANND.
+        obtained_annd: NumPy array of binned ANND values for the generated graph.
+        target_annd: NumPy array of binned ANND values for the reference graph.
     Returns:
-        A scalar error value representing the discrepancy in ANND.
+        A non-negative scalar representing the mean ANND discrepancy across bins.
     """    
     loss = np.log1p(40 * np.abs(obtained_annd - target_annd)**1.5)
     error = np.mean(loss)
@@ -478,13 +507,16 @@ def calculate_annd_error(obtained_annd: np.ndarray, target_annd: np.ndarray) -> 
 
 
 def calculate_eccentricity_error(obtained_ecc: np.ndarray, target_ecc: np.ndarray) -> float:
-    """Calculates the structural error between obtained eccentricity and target eccentricity.
-    
+    """Calculates the error between the obtained and target binned eccentricity vectors.
+
+    Uses the element-wise loss ``log1p(40 * |obtained - target| ** 1.5)``
+    averaged across all bins — identical in structure to :func:`calculate_annd_error`.
+
     Args:
-        obtained_ecc: NumPy array of obtained eccentricity values.
-        target_ecc: NumPy array of target eccentricity values.
+        obtained_ecc: NumPy array of binned eccentricity values for the generated graph.
+        target_ecc: NumPy array of binned eccentricity values for the reference graph.
     Returns:
-        A scalar error value representing the discrepancy in eccentricity.
+        A non-negative scalar representing the mean eccentricity discrepancy across bins.
     """    
     loss = np.log1p(40 * np.abs(obtained_ecc - target_ecc)**1.5)
     error = np.mean(loss)

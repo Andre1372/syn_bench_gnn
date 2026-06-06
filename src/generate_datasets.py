@@ -1,4 +1,14 @@
-"""Module for orchestrating the graph generation and evaluation experiment."""
+"""Orchestration of synthetic graph generation and dataset persistence.
+
+This module exposes :func:`generate_synthetic_variants`, the main entry point
+for producing synthetic graph datasets from a preprocessed TUDataset baseline.
+It coordinates:
+
+- Loading the preprocessed ``_original_*.pt`` file.
+- Building per-graph or distributional generation tasks.
+- Dispatching generation workers (serial or multiprocessing pool).
+- Accumulating results and saving each variant as a ``.pt`` file.
+"""
 
 import logging
 import multiprocessing as mp
@@ -10,7 +20,6 @@ import numpy as np
 import networkx as nx
 import torch
 from torch_geometric.data import Data
-from torch_geometric.datasets import TUDataset
 from tqdm import tqdm
 from tqdm.contrib.logging import logging_redirect_tqdm
 
@@ -45,20 +54,23 @@ KNOWN_METHODS: frozenset[str] = frozenset({"padma", "pdd", "ergm", "dummyEdges",
 
 
 def generate_graph(target_stats: dict[str, Any], method: str, rng: np.random.Generator = None) -> tuple[nx.Graph, dict]:
-    """Generates a graph using method.
+    """Generates a single graph according to the chosen method and target statistics.
+    
+    Graphs with 0 or 1 nodes are returned immediately as edgeless.
 
     Args:
-        target_stats: Dictionary containing graph statistics:
-            - 'n_nodes': Number of nodes.
-            - 'n_edges': Number of edges.
-            - 'degree_moments': List of moments for PADMA.
-            - 'observed_nx': (Optional) The original graph for 'pdd'.
-        method: The generating method.
-        rng: Random number generator.
+        target_stats: Dictionary containing graph statistics, e.g.:
+            ``'n_nodes'``, ``'n_edges'``, ``'degree_moments'``,
+            ``'annd'``, ``'eccentricity'``.  Methods ``'pdd'`` and ``'ergm'``
+            additionally require ``'observed_nx'`` (a NetworkX Graph).
+        method: One of the supported method names listed above.
+        rng: NumPy random Generator.  A fresh generator is created when *None*.
     Returns:
-        A tuple (G_nx, info) where G_nx is the NetworkX graph and info is a dict.
+        A tuple ``(G_nx, info)`` where ``G_nx`` is the generated NetworkX graph
+        and ``info`` is a method-specific dict (may be empty).
     Raises:
-        ValueError: If the method is not supported or required data is missing.
+        ValueError: If ``method`` is not recognised or a required key is missing
+            from ``target_stats``.
     """
     if rng is None:
         rng = np.random.default_rng()
@@ -498,12 +510,30 @@ def generate_synthetic_variants(
 def _worker_generate_variants(task: dict, method: str, num_variants: int) -> tuple[int, list, list, list, list, list]:
     """Generates all synthetic variants for a single graph (worker entry point).
 
+    Designed to run inside a multiprocessing worker.  All log messages emitted
+    during generation are captured in a ``StringIO`` buffer and returned as a
+    list of strings so they can be re-emitted by the parent process.
+    Thread-count is pinned to 1 via ``torch.set_num_threads`` to avoid
+    resource contention across workers.
+
     Args:
-        task: Dict with keys ``'i'``, ``'target_stats'``, ``'y'``, ``'obs_nx'``, ``'seeds'``.
-        method: Generation method name.
-        num_variants: Number of variants to generate
+        task: Dict produced by :func:`_build_tasks_direct` or
+            :func:`_build_tasks_distributional`, with keys:
+            ``'i'`` (graph index), ``'target_stats'`` (list of stat dicts, one
+            per variant), ``'y'`` (label tensor), ``'obs_nx'`` (optional
+            NetworkX graph for observation-dependent methods), and
+            ``'seeds'`` (list of integer seeds, one per variant).
+        method: Generation method name forwarded to :func:`generate_graph`.
+        num_variants: Number of variants to generate for this graph.
     Returns:
-        Tuple ``(graph_idx, graphs, seeds, errors, infos, captured_logs)``.
+        A tuple ``(graph_idx, graphs, seeds, errors, infos, captured_logs)`` where:
+        - ``graph_idx`` — the integer index ``i`` of the source graph.
+        - ``graphs`` — list of ``num_variants`` igraph.Graph objects (or ``None``
+          on failure).
+        - ``seeds`` — list of integer seeds actually used (``-1`` on failure).
+        - ``errors`` — list of ``(variant_idx, error_message)`` pairs.
+        - ``infos`` — list of method-specific info dicts.
+        - ``captured_logs`` — list of log-line strings captured during execution.
     """
     import io
     import logging

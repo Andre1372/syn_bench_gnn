@@ -55,7 +55,7 @@ class GCNGraphClassifier(nn.Module):
         )
 
     def forward(self, x: torch.Tensor, edge_index: torch.Tensor, batch: torch.Tensor) -> torch.Tensor:
-        """Forward pass for the GCN classifier."""
+        """Runs a forward pass through GCN layers, then mean+max pooling and the classification head."""
         x = self.gnn(x, edge_index)
         x = torch.cat([global_mean_pool(x, batch), global_max_pool(x, batch)], dim=1)
         return self.head(x)
@@ -95,7 +95,7 @@ class GINGraphClassifier(nn.Module):
         )
 
     def forward(self, x: torch.Tensor, edge_index: torch.Tensor, batch: torch.Tensor) -> torch.Tensor:
-        """Forward pass for the GIN classifier."""
+        """Runs a forward pass through GIN layers, then mean+max pooling and the classification head."""
         x = self.gnn(x, edge_index)
         x = torch.cat([global_mean_pool(x, batch), global_max_pool(x, batch)], dim=1)
         return self.head(x)
@@ -108,6 +108,7 @@ def train_epoch(model: nn.Module, loader: DataLoader, optimizer: optim.Optimizer
         model: The GNN model to train.
         loader: DataLoader providing minibatches.
         optimizer: Optimizer used for gradient updates.
+        criterion: Loss function (e.g. ``nn.CrossEntropyLoss``).
         device: Device on which to run the computation.
     Returns:
         The average cross-entropy loss over all batches in the epoch.
@@ -143,6 +144,7 @@ def eval_epoch(model: nn.Module, loader: DataLoader, criterion: nn.Module, devic
     Args:
         model: The GNN model to evaluate.
         loader: DataLoader providing minibatches.
+        criterion: Loss function used to compute per-batch loss.
         device: Device on which to run the computation.
     Returns:
         A tuple of (avg_loss, accuracy, macro_f1, roc_auc).
@@ -231,8 +233,11 @@ def get_per_graph_predictions(model: nn.Module, dataset: list[Data], device: tor
 
 
 def run_single_experiment(model: nn.Module, dataset: list[Data], run_id: int, device: torch.device, epochs: int, batch_size: int, lr: float, split_indices: tuple[list[int], list[int], list[int]]) -> dict[str, Any]:
-    """Trains and evaluates a GNN model.
-    
+    """Trains and evaluates a GNN model for a fixed number of epochs.
+
+    Uses Adam optimisation with ``CrossEntropyLoss``. The best checkpoint
+    (highest validation macro-F1) is restored before final test evaluation.
+
     Args:
         model: The GNN model to train.
         dataset: List of PyG Data objects (the full dataset to split).
@@ -244,7 +249,7 @@ def run_single_experiment(model: nn.Module, dataset: list[Data], run_id: int, de
         split_indices: Tuple of lists containing train/val/test split indices.
     Returns:
         A dictionary with keys: 'run_id', 'val_best_f1', 'test_f1',
-        'test_acc', 'test_roc_auc'.
+        'test_acc', 'test_roc_auc', 'val_f1_history'.
     """
     model = model.to(device)
     
