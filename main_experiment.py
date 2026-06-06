@@ -21,7 +21,8 @@ from src.train_gnn import evaluate_dataset
 from src.node_features import is_per_graph_strategy
 
 ALL_DATASETS = [
-        "BZR", "DHFR", "Mutagenicity", "MUTAG"
+        # "BZR", "DHFR", "Mutagenicity", "MUTAG", "Cuneiform", "MSRC_9", "MSRC_21", "MSRC_21C"
+        "AIDS", "BZR", "COX2", "DHFR", "Mutagenicity", "MUTAG", "NCI1", "PROTEINS", "OHSU", "ENZYMES"
         # "AIDS", "BZR", "COX2", "DHFR", "Mutagenicity", "MUTAG", "NCI1", "NCI109", "DD", "PROTEINS", "Cuneiform", "MSRC_9", "MSRC_21", "MSRC_21C", "KKI", "OHSU", "ENZYMES"
     ]
 
@@ -35,13 +36,13 @@ def parse_arguments() -> argparse.Namespace:
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
 
-    # Dataset and generation
+    # ── Data ────────────────────────────────────────────────────────────────
     parser.add_argument(
         "--dataset",
         type=str,
         nargs="+",
         default=ALL_DATASETS,
-        help="One or more TUDataset names to use as baseline (e.g. PROTEINS MUTAG). Use 'all' (default) to process all datasets in the data/ folder.",
+        help="One or more TUDataset names to use as baseline (e.g. PROTEINS MUTAG). Defaults to all datasets defined in ALL_DATASETS.",
     )
     parser.add_argument(
         "--cut_datasets",
@@ -54,28 +55,15 @@ def parse_arguments() -> argparse.Namespace:
             "preserves the node/edge-count distribution within each class."
         ),
     )
-    parser.add_argument(
-        "--distribution_sampler",
-        type=str,
-        nargs="+",
-        default=None,
-        metavar="SAMPLER",
-        choices=list(KNOWN_SAMPLERS),
-        help=(
-            f"One or more encoder-decoders for distributional stat sampling. "
-            f"Supported: {', '.join(sorted(KNOWN_SAMPLERS))}. "
-            f"If omitted, per-graph statistics are replicated directly (no sampler). "
-            f"Note: samplers are incompatible with the features "
-            f"'random_sample', 'degree_ordered', 'neighbor_degree_ordered'."
-        ),
-    )
+
+    # ── Generation ──────────────────────────────────────────────────────────
     parser.add_argument(
         "--methods",
         type=str,
         nargs="+",
         default=["dummyNodes", "dummyEdges", "padma", "anndg", "anndgE"],
         metavar="METHOD",
-        help=f"Generation methods to run.  Supported: {', '.join(KNOWN_METHODS)}.",
+        help=f"Generation methods to run.  Supported: {', '.join(KNOWN_METHODS)}.  Defaults to all known methods.",
     )
     parser.add_argument(
         "--num_synth_datasets",
@@ -84,8 +72,40 @@ def parse_arguments() -> argparse.Namespace:
         default=20,
         help="Number of independent synthetic variants V to generate per (dataset, method) pair.",
     )
+    parser.add_argument(
+        "--distribution_sampler",
+        type=str,
+        nargs="+",
+        default=list(KNOWN_SAMPLERS),
+        metavar="SAMPLER",
+        choices=list(KNOWN_SAMPLERS),
+        help=(
+            f"One or more encoder-decoders for distributional stat sampling. "
+            f"Supported: {', '.join(sorted(KNOWN_SAMPLERS))}. "
+            f"Defaults to all known samplers. "
+            f"Per-graph feature strategies ('random_sample', 'degree_ordered', 'neighbor_degree_ordered') "
+            f"are always run without a sampler; incompatible combinations are skipped automatically."
+        ),
+    )
 
-    # GNN training
+    # ── Node features ───────────────────────────────────────────────────────
+    parser.add_argument(
+        "--features",
+        type=str,
+        nargs="+",
+        default=["random_sample", "degree_ordered", "neighbor_degree_ordered"],
+        choices=["constant", "log_bin_deg", "random_sample", "degree_ordered", "neighbor_degree_ordered"],
+        help=(
+            "One or more node feature strategies to run. "
+            "'constant': all-ones dummy (in_dim=1). "
+            "'log_bin_deg': one-hot log-binned degree. "
+            "'random_sample', 'degree_ordered', 'neighbor_degree_ordered': per-graph "
+            "transplanting strategies (always run without a sampler). "
+            "Defaults to all three per-graph strategies."
+        ),
+    )
+
+    # ── GNN training & evaluation ────────────────────────────────────────────
     parser.add_argument(
         "--process_original",
         action="store_true",
@@ -99,17 +119,7 @@ def parse_arguments() -> argparse.Namespace:
         help="Number of independent GNN training runs per dataset for variance estimation.",
     )
 
-    # Infrastructure
-    parser.add_argument(
-        "--seed",
-        type=int,
-        default=-1,
-        help=(
-            "RNG seed for synthetic data generation.  "
-            "GNN training is always randomised independently.  "
-            "Pass -1 for a fully stochastic run."
-        ),
-    )
+    # ── Infrastructure ───────────────────────────────────────────────────────
     parser.add_argument(
         "--skip_generation",
         action="store_true",
@@ -127,23 +137,19 @@ def parse_arguments() -> argparse.Namespace:
         help="Number of worker processes for parallel generation (Phase A).",
     )
     parser.add_argument(
+        "--seed",
+        type=int,
+        default=-1,
+        help=(
+            "RNG seed for synthetic data generation.  "
+            "GNN training is always randomised independently.  "
+            "Pass -1 for a fully stochastic run."
+        ),
+    )
+    parser.add_argument(
         "--quick_test",
         action="store_true",
         help="Run a fast functional test (1 epoch, 1 run, small models).",
-    )
-    parser.add_argument(
-        "--features",
-        type=str,
-        nargs="+",
-        default=["log_bin_deg"],
-        choices=["constant", "log_bin_deg", "random_sample", "degree_ordered", "neighbor_degree_ordered"],
-        help=(
-            "One or more node feature strategies to run. "
-            "'constant': all-ones dummy (in_dim=1). "
-            "'log_bin_deg': one-hot log-binned degree (default). "
-            "'random_sample', 'degree_ordered', 'neighbor_degree_ordered': per-graph "
-            "transplanting strategies — incompatible with --distribution_sampler."
-        ),
     )
     return parser.parse_args()
 
@@ -152,34 +158,43 @@ PER_GRAPH_FEATURES = frozenset({"random_sample", "degree_ordered", "neighbor_deg
 
 
 def _build_run_combinations(features_list: list[str], samplers_list: list[str] | None) -> list[tuple[str, str | None]]:
-    """Returns valid (feature, sampler) combinations, enforcing incompatibility rules.
+    """Returns valid (feature, sampler) combinations.
 
     Per-graph feature strategies ('random_sample', 'degree_ordered',
-    'neighbor_degree_ordered') cannot be combined with any distribution sampler.
+    'neighbor_degree_ordered') are always run without a distribution sampler
+    (sampler=None).  If samplers are also requested, a warning is logged and
+    the incompatible combinations are silently skipped.
 
     Args:
         features_list: List of requested feature strategies.
-        samplers_list: List of requested samplers, or None for the direct (no-sampler) mode.
+        samplers_list: List of requested samplers, or None for direct (no-sampler) mode.
 
     Returns:
         A list of (feature, sampler_or_None) tuples representing valid combinations.
-
-    Raises:
-        ValueError: If a per-graph feature is combined with a sampler.
     """
-    samplers: list[str | None] = samplers_list if samplers_list is not None else [None]
+    _log = logging.getLogger(__name__)
+    global_samplers: list[str | None] = samplers_list if samplers_list is not None else [None]
+
+    per_graph_feats = [f for f in features_list if f in PER_GRAPH_FEATURES]
+    if per_graph_feats and samplers_list is not None:
+        _log.warning(
+            "Per-graph feature strategies (%s) are incompatible with distribution samplers "
+            "and will always run without a sampler. The requested sampler(s) are ignored for them.",
+            ", ".join(per_graph_feats),
+        )
 
     combos: list[tuple[str, str | None]] = []
+    seen: set[tuple[str, str | None]] = set()
     for feat in features_list:
-        for samp in samplers:
-            if feat in PER_GRAPH_FEATURES and samp is not None:
-                raise ValueError(
-                    f"Feature strategy '{feat}' is per-graph and cannot be combined "
-                    f"with distribution sampler '{samp}'. "
-                    f"Remove the sampler or choose a global feature strategy "
-                    f"('constant', 'log_bin_deg')."
-                )
-            combos.append((feat, samp))
+        if feat in PER_GRAPH_FEATURES:
+            if (feat, None) not in seen:
+                combos.append((feat, None))
+                seen.add((feat, None))
+        else:
+            for samp in global_samplers:
+                if (feat, samp) not in seen:
+                    combos.append((feat, samp))
+                    seen.add((feat, samp))
     return combos
 
 
@@ -212,13 +227,8 @@ def main() -> None:
 
     project_root = Path(".")
 
-    # Build and validate all (feature, sampler) combinations upfront.
-    try:
-        run_combos = _build_run_combinations(args.features, args.distribution_sampler)
-    except ValueError as exc:
-        import sys
-        print(f"[ERROR] {exc}", file=sys.stderr)
-        sys.exit(1)
+    # Build all valid (feature, sampler) combinations upfront.
+    run_combos = _build_run_combinations(args.features, args.distribution_sampler)
 
     n_datasets = len(args.dataset)
     n_methods = len(args.methods)

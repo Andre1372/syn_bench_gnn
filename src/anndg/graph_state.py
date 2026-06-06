@@ -3,8 +3,6 @@
 from dataclasses import dataclass
 import numpy as np
 import igraph as ig
-from collections import deque
-from src.graph_analysis import calculate_diameter
 
 
 @dataclass(frozen=True)
@@ -51,16 +49,16 @@ class GraphState:
                 self._edge_to_idx[edge] = len(self._edges)
                 self._edges.append(edge)
 
-        self._degrees = np.array(graph.degree(), dtype=int)
-        self._num_active_nodes: int = int(np.count_nonzero(self._degrees))
+        degrees = np.array(graph.degree(), dtype=int)
+        self._num_active_nodes: int = int(np.count_nonzero(degrees))
         
         # Fix the binning permutation at initialization for consistency.
         # We only bin nodes that are active (degree > 0).
         if self._num_active_nodes > 0:
-            active_mask = self._degrees > 0
+            active_mask = degrees > 0
             active_indices = np.where(active_mask)[0]
             # Sort active indices by their initial degree
-            self._fixed_active_indices = active_indices[np.argsort(self._degrees[active_mask])]
+            self._fixed_active_indices = active_indices[np.argsort(degrees[active_mask])]
         else:
             self._fixed_active_indices = np.array([], dtype=int)
         
@@ -77,57 +75,6 @@ class GraphState:
         """Returns the current number of edges in the graph."""
         return self._num_edges
     
-    @property
-    def exact_diameter(self) -> int:
-        """Returns the exact diameter of the graph using igraph."""
-        return int(calculate_diameter(self.get_graph()))
-
-    @property
-    def approximate_diameter(self) -> int:
-        """
-        Returns the approximate diameter of the graph using a two-sweep BFS.
-        """
-        if self._num_nodes <= 1 or self._num_edges == 0:
-            return 0
-        
-        visited_global = [False] * self._num_nodes
-        max_diam = 0
-        
-        def bfs_furthest(start_node: int) -> tuple[int, int]:
-            distances = [-1] * self._num_nodes
-            distances[start_node] = 0
-            queue = deque([start_node])
-            furthest_node = start_node
-            max_dist = 0
-            
-            while queue:
-                curr = queue.popleft()
-                visited_global[curr] = True
-                curr_dist = distances[curr]
-                
-                for neighbor in self._adj_list[curr]:
-                    if distances[neighbor] == -1:
-                        d = curr_dist + 1
-                        distances[neighbor] = d
-                        queue.append(neighbor)
-                        if d > max_dist:
-                            max_dist = d
-                            furthest_node = neighbor
-                            
-            return furthest_node, max_dist
-
-        for i in range(self._num_nodes):
-            if not visited_global[i]:
-                # 1st sweep: find a peripheral node
-                u, _ = bfs_furthest(i)
-                # 2nd sweep: find the distance from that peripheral node
-                _, comp_diam = bfs_furthest(u)
-                
-                if comp_diam > max_diam:
-                    max_diam = comp_diam
-        
-        return max_diam
-
     def has_edge(self, u: int, v: int) -> bool:
         """Checks if an edge exists between two nodes."""
         return v in self._adj_list[u]
@@ -148,11 +95,12 @@ class GraphState:
         return self._edges[idx]
 
     def get_random_node_from_bin(
-        self, 
-        bin_idx: int, 
+        self,
+        bin_idx: int,
         rng: np.random.Generator,
         current_value: float | None = None,
-        target_value: float | None = None
+        target_value: float | None = None,
+        knn_normalized: np.ndarray | None = None,
     ) -> int | None:
         """
         Samples a node from a specific bin in O(1) time, with optional KNN-based filtering.
@@ -162,6 +110,9 @@ class GraphState:
             rng: The random number generator to use.
             current_value: Current ANND value for this bin (normalized).
             target_value: Target ANND value for this bin (normalized).
+            knn_normalized: Pre-computed per-node normalized KNN values, as returned
+                by ``get_annd()``. When provided together with ``current_value`` and
+                ``target_value``, avoids a redundant KNN computation.
         Returns:
             The index of the sampled node, or None if the bin is empty or no node satisfies the condition.
         Raises:
@@ -171,23 +122,18 @@ class GraphState:
             raise ValueError(f"Bin index {bin_idx} out of range [0, {self._bins}).")
 
         bin_nodes = self._bin_indices[bin_idx]
-        
-        # Apply conditional filtering if parameters are provided
-        if current_value is not None and target_value is not None:
-            knn_nodes, _ = self.get_graph().knn()
-            knn_raw = np.array(knn_nodes, dtype=float)
-            norm_factor = (self._num_nodes - 1)
-            if norm_factor > 0:
-                # Calculate normalized KNN for nodes in this bin
-                bin_knn = knn_raw[bin_nodes] / norm_factor
-                if current_value < target_value:
-                    # current < target -> we want to sample nodes that are pull the average down
-                    mask = bin_knn <= current_value
-                else:
-                    # current > target -> we want to sample nodes that are pull the average up
-                    mask = bin_knn >= current_value
-                
-                bin_nodes = bin_nodes[mask]
+
+        # Apply conditional filtering if all required parameters are provided.
+        if current_value is not None and target_value is not None and knn_normalized is not None:
+            bin_knn = knn_normalized[bin_nodes]
+            if current_value < target_value:
+                # current < target → sample nodes that pull the average down
+                mask = bin_knn <= current_value
+            else:
+                # current > target → sample nodes that pull the average up
+                mask = bin_knn >= current_value
+
+            bin_nodes = bin_nodes[mask]
 
         if bin_nodes.size == 0:
             return None
@@ -195,22 +141,31 @@ class GraphState:
         idx = rng.integers(0, bin_nodes.size)
         return int(bin_nodes[idx])
 
-    def get_annd(self) -> np.ndarray:
-        """
-        Computes the Average Nearest Neighbor Degree (ANND) for each node in the graph, normalizes it and bins it into percentiles.
-        """
-        if self._num_nodes == 0: return np.zeros(self._bins, dtype=float)
-        if self._num_active_nodes <= 1: return np.zeros(self._bins, dtype=float)
-        
-        knn_nodes, _ = self.get_graph().knn()
-        annd_raw = np.array(knn_nodes, dtype=float)
-        norm_factor = (self._num_nodes - 1)
+    def get_annd(self) -> tuple[np.ndarray, np.ndarray]:
+        """Computes the ANND profile for the graph.
 
-        # Calculate mean for each fixed group of nodes using pre-calculated indices
-        return np.array([
-            annd_raw[indices].mean() / norm_factor if indices.size > 0 else 0.0 
+        Returns a pair ``(binned_annd, knn_normalized)`` where:
+        - ``binned_annd`` is a per-bin mean of the normalized ANND (shape ``(bins,)``).
+        - ``knn_normalized`` is the per-node normalized KNN value (shape ``(num_nodes,)``).
+
+        Returning both avoids a second KNN computation when the caller also needs
+        per-node values (e.g. for ``get_random_node_from_bin`` filtering).
+        """
+        if self._num_nodes == 0: return np.zeros(self._bins, dtype=float), np.zeros(0, dtype=float)
+        if self._num_active_nodes <= 1: return np.zeros(self._bins, dtype=float), np.zeros(self._num_nodes, dtype=float)
+
+        knn_nodes, _ = self.get_graph().knn()
+        knn_raw = np.array(knn_nodes, dtype=float)
+        norm_factor = self._num_nodes - 1
+        knn_normalized = knn_raw / norm_factor if norm_factor > 0 else knn_raw
+
+        # Per-bin mean of normalized KNN values
+        binned_annd = np.array([
+            knn_raw[indices].mean() / norm_factor if indices.size > 0 else 0.0
             for indices in self._bin_indices
         ], dtype=float)
+
+        return binned_annd, knn_normalized
 
     def get_eccentricity(self) -> np.ndarray:
         """
@@ -242,7 +197,6 @@ class GraphState:
         new_state._adj_list = [set(adj) for adj in self._adj_list]
         new_state._edges = list(self._edges)
         new_state._edge_to_idx = dict(self._edge_to_idx)
-        new_state._degrees = self._degrees.copy()
         new_state._num_active_nodes = self._num_active_nodes
         new_state._fixed_active_indices = self._fixed_active_indices.copy()
         new_state._bins = self._bins

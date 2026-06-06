@@ -36,7 +36,7 @@ _COOLING_BITS: int = 3                      # cooling = 2^(-_COOLING_BITS / max_
 
 _GOOD_ENOUGH_THRESHOLD: float = 1e-4
 
-# Debug / plotting
+# For single graph generation debugging in notebooks/single_generation_analysis.ipynb
 _DEBUG_TARGET_ASSORTATIVITY: float = -0.2179
 
 
@@ -114,6 +114,7 @@ def _propose_intelligent_double_edge_swap(
     graph_state: GraphState,
     current_annd: np.ndarray,
     target_annd: np.ndarray,
+    knn_normalized: np.ndarray,
     rng: np.random.Generator,
     current_ecc: np.ndarray | None = None,
     target_ecc: np.ndarray | None = None,
@@ -143,7 +144,7 @@ def _propose_intelligent_double_edge_swap(
     for b in sorted_bins:
         is_last = b == sorted_bins[-1]
         if is_last or rng.random() < _BIN_SELECTION_PROB:
-            u = graph_state.get_random_node_from_bin(b, rng,current_value=current_annd[b],target_value=target_annd[b],)
+            u = graph_state.get_random_node_from_bin(b, rng, current_value=current_annd[b], target_value=target_annd[b], knn_normalized=knn_normalized)
             if u is not None:
                 neighbors = list(graph_state.neighbors(u))
                 if neighbors:
@@ -208,7 +209,7 @@ def optimizer(
 
     # ---- Initialise state ---------------------------------------------------
     graph_state = GraphState(initial_graph, bins=bins)
-    current_annd = graph_state.get_annd()
+    current_annd, _knn_norm = graph_state.get_annd()
     current_ecc = graph_state.get_eccentricity() if target_eccentricity is not None else None
 
     # Early exit if the graph does not have enough edges for double-edge swap
@@ -256,7 +257,7 @@ def optimizer(
     }
 
     def _build_info(gs: GraphState) -> dict:
-        info: dict = {"best_error": best_state["error"], "best_annd": gs.get_annd()}
+        info: dict = {"best_error": best_state["error"], "best_annd": gs.get_annd()[0]}
         if target_eccentricity is not None:
             info["best_eccentricity"] = gs.get_eccentricity()
         return info
@@ -275,7 +276,7 @@ def optimizer(
         # Find a valid proposal (retry up to `patience` times)
         change: GraphChange | None = None
         for _ in range(patience):
-            change = _propose_intelligent_double_edge_swap(graph_state, current_annd, target_annd, rng, current_ecc=current_ecc, target_ecc=target_eccentricity,)
+            change = _propose_intelligent_double_edge_swap(graph_state, current_annd, target_annd, _knn_norm, rng, current_ecc=current_ecc, target_ecc=target_eccentricity,)
             if change is not None:
                 break
 
@@ -285,10 +286,12 @@ def optimizer(
             break
 
         # Evaluate proposed state
+        # Snapshot current knn_norm so we can restore it cheaply on reject.
+        prev_knn_norm = _knn_norm
         graph_state.apply_change(change)
-        proposed_annd = graph_state.get_annd()
+        proposed_annd, _knn_norm = graph_state.get_annd()
         proposed_ecc = graph_state.get_eccentricity() if target_eccentricity is not None else None
-        
+
         proposed_annd_errors = _compute_annd_errors(proposed_annd, target_annd)
         proposed_ecc_errors = _compute_eccentricity_errors(proposed_ecc, target_eccentricity) if proposed_ecc is not None else None
         proposed_error = _combined_error(proposed_annd_errors, proposed_ecc_errors)
@@ -310,8 +313,9 @@ def optimizer(
             current_ecc = proposed_ecc
             steps_without_improvement += 1
         else:
-            # Reject
+            # Reject: revert graph and restore the pre-change knn_norm snapshot (no extra KNN call).
             graph_state.revert_change(change)
+            _knn_norm = prev_knn_norm
             steps_without_improvement += 1
 
         # Temperature decay

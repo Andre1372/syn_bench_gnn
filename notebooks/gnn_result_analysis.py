@@ -28,12 +28,13 @@ from notebooks.visualization_utils import add_baseline_guide, plot_performance_d
 # Exactly ONE of the three variables should be None at a time; the other two
 # must be set to a single valid string from the canonical orders below.
 FIXED_METHODS:  str | None = "anndgE"        # set to None to vary methods
-FIXED_SAMPLERS: str | None = None    # set to None to vary samplers
-FIXED_FEATURES: str | None = "log_bin_deg"            # set to None to vary features
+FIXED_SAMPLERS: str | None = "nosampler"    # set to None to vary samplers
+FIXED_FEATURES: str | None = None          # set to None to vary features
 
 RESULTS_DIR = PROJECT_ROOT / "results"
 DATASET_NAMES = [
-    "BZR", "DHFR", "Mutagenicity", "MUTAG", "AIDS", "PROTEINS", "Letter-low", "Letter-med"
+    "BZR", "DHFR", "Mutagenicity", "MUTAG",
+    "Cuneiform", "MSRC_21C", "MSRC_21", "MSRC_9"
 ]
 
 # Methods
@@ -77,26 +78,54 @@ def _canonical_order(values, order):
 
 def load_experiment_data() -> pd.DataFrame:
     """Loads and preprocesses main GNN evaluation data."""
+    # Dataset names may contain underscores (e.g. MSRC_21, MSRC_9); build an
+    # alternation sorted longest-first so the greedy match picks the right one.
+    dname_alts = "|".join(re.escape(d) for d in sorted(DATASET_NAMES, key=len, reverse=True))
+
     # Sort SAMPLER_ORDER by length descending so that 'percentile_corr' matches before 'percentile'
     sampler_alts = "|".join(re.escape(s) for s in sorted(SAMPLER_ORDER, key=len, reverse=True))
-    results_pattern = re.compile(
+
+    # Pattern for synthetic result files: gnn_global_<dataset>_<method>_<sampler>_<feature>.csv
+    synth_pattern = re.compile(
         r"gnn_global_"
-        r"(?P<dname>[A-Za-z][A-Za-z0-9\-]*)_"          # dataset name
-        r"(?P<mname>[A-Za-z][A-Za-z0-9]*)_"             # method name
-        r"(?P<sampler>" + sampler_alts + r")_"           # sampler (exact match)
-        r"(?P<feature>[a-zA-Z0-9_]+)"                    # feature strategy
+        r"(?P<dname>" + dname_alts + r")_"
+        r"(?P<mname>[A-Za-z][A-Za-z0-9]*)_"
+        r"(?P<sampler>" + sampler_alts + r")_"
+        r"(?P<feature>[a-zA-Z0-9_]+)"
         r"\.csv$"
+    )
+
+    # Pattern for original-baseline files: gnn_global_<dataset>_original_native.csv
+    baseline_pattern = re.compile(
+        r"gnn_global_"
+        r"(?P<dname>" + dname_alts + r")_"
+        r"original_native\.csv$"
     )
 
     dfs_results = []
     for csv_path in RESULTS_DIR.glob("gnn_global_*.csv"):
-        match = results_pattern.match(csv_path.name)
-        if match is None:
+        # Try baseline pattern first
+        bm = baseline_pattern.match(csv_path.name)
+        if bm is not None:
+            dname = bm.group("dname")
+            if dname not in DATASET_NAMES:
+                continue
+            df = pd.read_csv(csv_path)
+            # Baseline rows already have source='original'; assign sentinel values
+            df["method"]  = "original"
+            df["sampler"] = "nosampler"
+            df["feature"] = "native"
+            dfs_results.append(df)
             continue
-        dname   = match.group("dname")
-        mname   = match.group("mname")
-        sampler = match.group("sampler")
-        feature = match.group("feature")
+
+        # Try synthetic pattern
+        sm = synth_pattern.match(csv_path.name)
+        if sm is None:
+            continue
+        dname   = sm.group("dname")
+        mname   = sm.group("mname")
+        sampler = sm.group("sampler")
+        feature = sm.group("feature")
 
         if dname not in DATASET_NAMES:
             continue
@@ -151,11 +180,13 @@ def _resolve_vary_axis() -> str:
 def _filter_df(df: pd.DataFrame) -> pd.DataFrame:
     """Filters df to rows matching the two fixed dimensions."""
     mask = pd.Series(True, index=df.index)
-    # Always keep the original baseline, overriding method and sampler filters.
-    # However, for features, we still filter the baseline because baselines are feature-specific.
-    if FIXED_METHODS  is not None: mask &= ((df["method"]  == FIXED_METHODS) | (df["source_base"] == "original"))
-    if FIXED_SAMPLERS is not None: mask &= ((df["sampler"] == FIXED_SAMPLERS) | (df["source_base"] == "original"))
-    if FIXED_FEATURES is not None: mask &= (df["feature"] == FIXED_FEATURES)
+    # Always keep the original baseline rows regardless of any fixed dimension.
+    # Baseline files use feature='native' (not a synthetic feature strategy), so
+    # they must be exempt from all three filters to remain visible in every plot.
+    is_orig = df["source_base"] == "original"
+    if FIXED_METHODS  is not None: mask &= ((df["method"]  == FIXED_METHODS) | is_orig)
+    if FIXED_SAMPLERS is not None: mask &= ((df["sampler"] == FIXED_SAMPLERS) | is_orig)
+    if FIXED_FEATURES is not None: mask &= ((df["feature"] == FIXED_FEATURES) | is_orig)
     return df[mask].copy()
 
 def _vary_col_and_meta() -> tuple[str, list, dict, str]:

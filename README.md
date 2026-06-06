@@ -8,7 +8,9 @@
   - [Usage](#usage)
     - [Standard Command for a Full Benchmark Run](#standard-command-for-a-full-benchmark-run)
     - [Command Line Arguments](#command-line-arguments)
-      - [Dataset \& Generation Settings](#dataset--generation-settings)
+      - [Data Settings](#data-settings)
+      - [Generation Settings](#generation-settings)
+      - [Node Feature Settings](#node-feature-settings)
       - [GNN Training \& Evaluation Settings](#gnn-training--evaluation-settings)
       - [Execution \& Infrastructure Settings](#execution--infrastructure-settings)
   - [Results Analysis and Visualization](#results-analysis-and-visualization)
@@ -82,7 +84,7 @@ syn_bench_gnn/
 
 ### Standard Command for a Full Benchmark Run
 ```bash
-nohup python main_experiment.py --cut_datasets 500 --features_BinLogDeg --process_original > output.log 2>&1 &
+nohup python main_experiment.py --cut_datasets 500 --process_original > output.log 2>&1 &
 ```
 
 ---
@@ -91,22 +93,43 @@ nohup python main_experiment.py --cut_datasets 500 --features_BinLogDeg --proces
 
 `main_experiment.py` accepts the following arguments:
 
-#### Dataset & Generation Settings
+#### Data Settings
 - `--dataset [DATASET ...]`  
   One or more TUDataset names to process (e.g., `MUTAG`, `BZR`, `DHFR`, `Mutagenicity`).  
-  *Default:* `["BZR", "DHFR", "Mutagenicity", "MUTAG"]`
+  *Default:* all datasets in `ALL_DATASETS` (`"AIDS"`, `"BZR"`, `"COX2"`, `"DHFR"`, `"Mutagenicity"`, `"MUTAG"`, `"NCI1"`, `"PROTEINS"`, `"OHSU"`, `"ENZYMES"`)
 - `--cut_datasets N`  
   If set, each dataset is down-sampled to at most `N` graphs before generation. The down-sampling is stratified by label and preserves node/edge distributions.
-- `--distribution_sampler SAMPLER`  
-  Encoder-decoder to use for distributional statistic sampling. If omitted, per-graph statistics are replicated directly.  
-  *Choices:* `gmcm`, `moments`, `percentile`, `percentile_corr`
+
+#### Generation Settings
 - `--methods METHOD [METHOD ...]`  
   Graph generation methods to run.  
   *Choices:* `padma`, `pdd`, `ergm`, `dummyEdges`, `dummyNodes`, `anndg`, `anndgE`, `nextGen`  
-  *Default:* `["dummyNodes", "dummyEdges", "padma", "anndg", "anndgE"]`
+  *Default:* all known methods
 - `--num_synth_datasets V`, `-V V`  
   Number of independent synthetic variants *V* to generate per (dataset, method) pair.  
-  *Default:* `20`.
+  *Default:* `20`
+- `--distribution_sampler SAMPLER [SAMPLER ...]`  
+  One or more encoder-decoders for distributional statistic sampling.  
+  *Choices:* `gmcm`, `moments`, `percentile`, `percentile_corr`  
+  *Default:* all known samplers
+
+#### Node Feature Settings
+- `--features STRATEGY [STRATEGY ...]`  
+  One or more node feature strategies to apply. Multiple strategies generate independent evaluation runs.  
+  *Default:* `["random_sample", "degree_ordered", "neighbor_degree_ordered"]`
+
+  | Strategy                  | Description                                             |
+  | ------------------------- | ------------------------------------------------------- |
+  | `constant`                | All-ones dummy features (`in_dim=1`)                    |
+  | `log_bin_deg`             | One-hot log-binned degree vector                        |
+  | `random_sample`           | Per-graph feature transplant via random node sampling   |
+  | `degree_ordered`          | Per-graph feature transplant ordered by degree          |
+  | `neighbor_degree_ordered` | Per-graph feature transplant ordered by neighbor degree |
+
+  > [!NOTE]
+  > The three per-graph strategies (`random_sample`, `degree_ordered`, `neighbor_degree_ordered`) use the original dataset's native node features and are incompatible with `--distribution_sampler`. When both are active, incompatible combinations are **automatically skipped** with a warning — no error is raised.
+
+  Output CSV files are tagged with a `{sampler}_{feature}` suffix (e.g., `nosampler_random_sample`) to distinguish each combination.
 
 #### GNN Training & Evaluation Settings
 - `--process_original`  
@@ -114,13 +137,8 @@ nohup python main_experiment.py --cut_datasets 500 --features_BinLogDeg --proces
 - `--gnn_runs R`, `-R R`  
   Number of independent GNN training runs per dataset for robust variance estimation.  
   *Default:* `10`
-- `--features_BinLogDeg`  
-  Uses log-binned degree one-hot vectors as node features instead of the default constant all-ones dummy vectors.
 
 #### Execution & Infrastructure Settings
-- `--seed SEED`  
-  RNG seed for synthetic graph generation to ensure reproducibility. (Note: GNN training is always independently randomized). Pass `-1` for a fully stochastic generation run.  
-  *Default:* `-1`
 - `--skip_generation`  
   Skip Phase A (generation) and use existing synthetic datasets stored in `synthetic_data/`.
 - `--skip_evaluation`  
@@ -128,6 +146,9 @@ nohup python main_experiment.py --cut_datasets 500 --features_BinLogDeg --proces
 - `--num_workers N`  
   Number of worker processes for parallel graph generation.  
   *Default:* `90%` of available CPU cores.
+- `--seed SEED`  
+  RNG seed for synthetic graph generation to ensure reproducibility. (Note: GNN training is always independently randomized). Pass `-1` for a fully stochastic generation run.  
+  *Default:* `-1`
 - `--quick_test`  
   Runs a rapid functional validation (1 epoch, 1 GNN run, smaller hidden dimensions).
 
