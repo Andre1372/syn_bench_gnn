@@ -88,11 +88,12 @@ def analyze_single_graph(graph: ig.Graph) -> dict[str, float]:
         A dictionary with keys: ``'n_nodes'``, ``'n_edges'``, ``'modularity'``,
         ``'clustering'``, ``'assortativity'``, ``'efficiency'``, ``'diameter'``,
         ``'degree_moments'`` (array of 4 normalised moments), ``'annd'``
-        (binned average nearest-neighbour degree), and ``'eccentricity'``
-        (binned normalised eccentricity).
+        (binned average nearest-neighbour degree), ``'eccentricity'``
+        (binned normalised eccentricity), and ``'motifs'`` (array of normalised
+        connected-motif counts for sizes 3 and 4, divided by ``C(n, s)`` so
+        values are in ``[0, 1]`` and comparable across graphs of different sizes).
     """
     deg_moments = count_deg_moments(graph)
-    motifs = count_motifs(graph, k=4)
     modularity = calculate_modularity(graph)
     clustering = calculate_clustering_coefficient(graph)
     assortativity = calculate_degree_assortativity(graph)
@@ -114,8 +115,7 @@ def analyze_single_graph(graph: ig.Graph) -> dict[str, float]:
         "eccentricity": eccentricity,
     }
 
-    # for i, val in enumerate(motifs):
-    #     stats_dict[f"motif_count_{i+1}"] = float(val)
+    stats_dict["motifs"] = count_motifs_normalized(graph, k=4)
 
     return stats_dict
 
@@ -307,7 +307,9 @@ def count_motifs(graph: ig.Graph, k: int, sampling_probs: list[float] | None = N
         sampling_probs: Optional list of probabilities for sampling at each size 
             from 3 to k. Used to estimate motif counts in large graphs.
     Returns:
-        A NumPy array containing the frequency of each valid, connected, non-isomorphic motif.
+        A NumPy array containing the raw count of each valid, connected,
+        non-isomorphic motif (one entry per isomorphism class, ordered by
+        igraph's isoclass index).
     """
     if sampling_probs is not None:
         if len(sampling_probs) != k:
@@ -346,6 +348,45 @@ def count_motifs(graph: ig.Graph, k: int, sampling_probs: list[float] | None = N
                 number_motifs.append(float(val))
 
     return np.array(number_motifs)
+
+
+def count_motifs_normalized(graph: ig.Graph, k: int = 4) -> np.ndarray:
+    """Returns normalised connected-motif frequencies for sizes 3 up to k.
+
+    Each raw motif count is divided by the number of size-*s* node subsets
+    ``C(n, s) = n! / (s! * (n-s)!)`` so that the resulting values are in
+    ``[0, 1]`` and comparable across graphs of different sizes.  Graphs with
+    fewer than ``s`` nodes receive a count of 0 for all size-``s`` motifs.
+
+    Args:
+        graph: The input igraph.Graph.
+        k: Maximum motif size to count (3, 4, or 5).  Defaults to 4.
+    Returns:
+        A NumPy float array of length equal to the number of connected
+        non-isomorphic undirected motifs up to size *k*.  For ``k=4`` this
+        yields 8 values (2 for size-3 + 6 for size-4).
+    """
+    from math import comb
+
+    raw = count_motifs(graph, k=k)
+    n = graph.vcount()
+
+    # Build a normalisation denominator per motif entry, matching the order
+    # produced by count_motifs (connected isoclasses, size 3 then size 4 ...).
+    denominators: list[float] = []
+    for s in range(3, k + 1):
+        probe = ig.Graph.Full(s, directed=False)
+        num_classes = len(probe.motifs_randesu(size=s))
+        denom = float(comb(n, s)) if n >= s else 1.0
+        for i in range(num_classes):
+            if ig.Graph.Isoclass(s, i, directed=False).is_connected():
+                denominators.append(denom)
+
+    denom_arr = np.array(denominators, dtype=float)
+    # Avoid division by zero for degenerate graphs
+    denom_arr = np.where(denom_arr > 0, denom_arr, 1.0)
+
+    return (raw / denom_arr).astype(float)
 
 
 # ------------------------------------------------------------------

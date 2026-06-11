@@ -1,0 +1,20 @@
+activation_strategy:
+  args:
+    initial_h: 4
+  name: ErrorThresholdActivationStrategy
+early_stopping:
+  acc_rate_target: 0.2
+  alpha: 0.75
+  patience: 20
+estimation:
+  clip_gradient_norm: 10.0
+  covariance_update_alpha: 0.25
+  covariance_update_interval: 5
+  final_samples: 5
+  learning_rate: 0.1
+  lr_decay: 0.95
+  updates: 300
+statistics: 4
+strategy:
+  args: {}
+  name: MultipleEdgeSwapStrategy

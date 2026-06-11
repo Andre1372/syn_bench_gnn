@@ -216,7 +216,7 @@ def ergm_fit_sample(
     target_stats = {
         "n_nodes": observed_ig.vcount(),
         "n_edges": observed_ig.ecount(),
-        "normalized_degree_moments": count_deg_moments(observed_ig).tolist()
+        "degree_moments": count_deg_moments(observed_ig).tolist()
     }
     initial_nx, _ = padma_generate_graph(target_stats, rng_init)
     initial_ig = networkx_to_igraph(initial_nx)

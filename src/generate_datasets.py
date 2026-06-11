@@ -119,6 +119,12 @@ def generate_graph(target_stats: dict[str, Any], method: str, rng: np.random.Gen
         if "observed_nx" not in target_stats:
             raise ValueError("Method 'ergm' requires 'observed_nx' in target_stats.")
         
+        # ERGM's MCMC with motif statistics is unstable on very small graphs;
+        # fall back to padma which correctly replicates n_nodes and n_edges.
+        if n_nodes < 5:
+            logger.info(f"Graph too small for ERGM (n_nodes={n_nodes} < 5), falling back to padma.")
+            return padma_generate_graph(target_stats, rng)
+        
         # We need a configuration directory or a default config for ERGM.
         # Let's check for a default yaml config in the project root.
         config_path = Path("src/ergm/default_config.yaml")

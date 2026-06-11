@@ -61,9 +61,9 @@ def parse_arguments() -> argparse.Namespace:
         "--methods",
         type=str,
         nargs="+",
-        default=["dummyNodes", "dummyEdges", "padma", "anndg", "anndgE"],
+        default=["dummyNodes", "dummyEdges", "padma", "anndg", "anndgE", "ergm"],
         metavar="METHOD",
-        help=f"Generation methods to run.  Supported: {', '.join(KNOWN_METHODS)}.  Defaults to all known methods.",
+        help=f"Generation methods to run.  Supported: {', '.join(KNOWN_METHODS)}.  Defaults to all known methods. Note: 'ergm' is only compatible with no_sampler (requires observed graph).",
     )
     parser.add_argument(
         "--num_synth_datasets",
@@ -78,10 +78,11 @@ def parse_arguments() -> argparse.Namespace:
         nargs="+",
         default=list(KNOWN_SAMPLERS),
         metavar="SAMPLER",
-        choices=list(KNOWN_SAMPLERS),
+        choices=list(KNOWN_SAMPLERS) + ["none"],
         help=(
             f"One or more encoder-decoders for distributional stat sampling. "
             f"Supported: {', '.join(sorted(KNOWN_SAMPLERS))}. "
+            f"Pass 'none' to run without any sampler. "
             f"Defaults to all known samplers. "
             f"Per-graph feature strategies ('random_sample', 'degree_ordered', 'neighbor_degree_ordered') "
             f"are always run without a sampler; incompatible combinations are skipped automatically."
@@ -227,8 +228,25 @@ def main() -> None:
 
     project_root = Path(".")
 
+    # Convert the sentinel value "none" to actual None (no-sampler mode).
+    if args.distribution_sampler == ["none"]:
+        args.distribution_sampler = None
+
     # Build all valid (feature, sampler) combinations upfront.
     run_combos = _build_run_combinations(args.features, args.distribution_sampler)
+
+    # Validate ergm compatibility
+    if "ergm" in args.methods:
+        incompatible_samplers = sorted({s for _, s in run_combos if s is not None})
+        if incompatible_samplers:
+            print(
+                f"[ERROR] Method 'ergm' is incompatible with distribution samplers "
+                f"({', '.join(incompatible_samplers)}). "
+                f"ergm requires '--distribution_sampler' to be omitted or all features "
+                f"to be per-graph strategies (random_sample, degree_ordered, neighbor_degree_ordered). "
+                f"Aborting."
+            )
+            raise SystemExit(1)
 
     n_datasets = len(args.dataset)
     n_methods = len(args.methods)

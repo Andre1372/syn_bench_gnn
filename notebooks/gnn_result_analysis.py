@@ -27,27 +27,27 @@ from notebooks.visualization_utils import add_baseline_guide, plot_performance_d
 # Cell 1 - Global Variables & Data Loading
 # Exactly ONE of the three variables should be None at a time; the other two
 # must be set to a single valid string from the canonical orders below.
-FIXED_METHODS:  str | None = "anndgE"        # set to None to vary methods
+FIXED_METHODS:  str | None = None        # set to None to vary methods
 FIXED_SAMPLERS: str | None = "nosampler"    # set to None to vary samplers
-FIXED_FEATURES: str | None = None          # set to None to vary features
+FIXED_FEATURES: str | None = "log_bin_deg"         # set to None to vary features
 
 RESULTS_DIR = PROJECT_ROOT / "results"
 DATASET_NAMES = [
-    "BZR", "DHFR", "Mutagenicity", "MUTAG",
-    "Cuneiform", "MSRC_21C", "MSRC_21", "MSRC_9"
+        # "BZR", "Cuneiform", "DHFR", "MUTAG", "Mutagenicity" # ,"MSRC_9", "MSRC_21", "MSRC_21C" # Features 
+        "BZR", "DHFR", "MUTAG", "Mutagenicity" # Methods
 ]
 
 # Methods
-METHOD_ORDER = ["dummyNodes", "dummyEdges", "padma", "anndg", "anndgD", "anndgE", "anndgED"]
+METHOD_ORDER = ["dummyNodes", "dummyEdges", "padma", "anndg", "anndgE", "ergm", "nextGen"]
 METHOD_PALETTE = {
     "original":   "#5B9BD5",
     "dummyNodes": "#DA7CF7",
     "dummyEdges": "#98C379",
     "padma":      "#F5C431",
     "anndg":      "#E06C75",
-    "anndgD":     "#5CE9FF",
-    "anndgE":     "#C47900",
-    "anndgED":    "#5242D1",
+    "anndgE":     "#5CE9FF",
+    "ergm":     "#C47900",
+    "nextGen":    "#5242D1",
 }
 
 # Samplers (None is stored as "nosampler" in filenames)
@@ -95,11 +95,11 @@ def load_experiment_data() -> pd.DataFrame:
         r"\.csv$"
     )
 
-    # Pattern for original-baseline files: gnn_global_<dataset>_original_native.csv
+    # Pattern for original-baseline files: gnn_global_<dataset>_original_<feature>.csv
     baseline_pattern = re.compile(
         r"gnn_global_"
         r"(?P<dname>" + dname_alts + r")_"
-        r"original_native\.csv$"
+        r"original_(?P<feature>[a-zA-Z0-9_]+)\.csv$"
     )
 
     dfs_results = []
@@ -114,7 +114,7 @@ def load_experiment_data() -> pd.DataFrame:
             # Baseline rows already have source='original'; assign sentinel values
             df["method"]  = "original"
             df["sampler"] = "nosampler"
-            df["feature"] = "native"
+            df["feature"] = bm.group("feature")   # "native" for per-graph strategies, or the actual feature name (e.g. "log_bin_deg")
             dfs_results.append(df)
             continue
 
@@ -192,6 +192,10 @@ def _filter_df(df: pd.DataFrame) -> pd.DataFrame:
 def _vary_col_and_meta() -> tuple[str, list, dict, str]:
     """Returns (col_name, ordered_values, palette, title_suffix) for the free axis."""
     vary = _resolve_vary_axis()
+    # Only consider synthetic rows when collecting which values are present on the
+    # free axis (original baseline rows carry sentinel values that must not become
+    # rows/categories of their own in the plots).
+    df_synth_only = df_raw[df_raw["source_base"] != "original"]
     if vary == "method":
         present = set(df_raw["source_base"]) - {"original"}
         vals    = _canonical_order(present, METHOD_ORDER)
@@ -199,13 +203,13 @@ def _vary_col_and_meta() -> tuple[str, list, dict, str]:
         suffix  = f"Fixed Sampler={FIXED_SAMPLERS}, Feature={FIXED_FEATURES}"
         col     = "source_base"
     elif vary == "sampler":
-        present = set(df_raw["sampler"].unique())
+        present = set(df_synth_only["sampler"].unique())
         vals    = _canonical_order(present, SAMPLER_ORDER)
         pal     = SAMPLER_PALETTE
         suffix  = f"Fixed Method={FIXED_METHODS}, Feature={FIXED_FEATURES}"
         col     = "sampler"
     else:  # vary == "feature"
-        present = set(df_raw["feature"].unique())
+        present = set(df_synth_only["feature"].unique())
         vals    = _canonical_order(present, FEATURE_ORDER)
         pal     = FEATURE_PALETTE
         suffix  = f"Fixed Method={FIXED_METHODS}, Sampler={FIXED_SAMPLERS}"

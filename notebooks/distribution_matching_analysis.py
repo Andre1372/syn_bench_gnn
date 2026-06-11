@@ -425,6 +425,69 @@ def plot_marginal_vs_joint(error_col: str = "synth") -> None:
     fig.tight_layout()
     plt.show()
 
-
-# --- Execute all plots ---
 plot_marginal_vs_joint(error_col="synth")
+
+
+
+# Cell 3 - Per-Dataset Marginal vs Joint Plots
+def plot_marginal_vs_joint_per_dataset(error_col: str = "synth") -> None:
+    """Scatter: mean Wasserstein (x) vs Frobenius norm of delta-Correlation (y) per dataset.
+
+    Creates a macro figure with 3 subplots per row, one for each dataset.
+    """
+    vary_col, vary_vals, palette, axis_label = _resolve_vary_col()
+
+    n_datasets = len(DATASETS)
+    if n_datasets == 0:
+        print("No datasets to plot.")
+        return
+
+    n_cols = 3
+    n_rows = (n_datasets + n_cols - 1) // n_cols
+
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(5 * n_cols, 4.5 * n_rows), squeeze=False)
+    suffix = "Target\u2192Original" if error_col == "target" else "Synthetic\u2192Original"
+    fig.suptitle(f"Distribution Matching per Dataset \u2014 {suffix}", fontsize=15, fontweight="bold", y=1.02)
+
+    for i, dataset in enumerate(DATASETS):
+        r, c = divmod(i, n_cols)
+        ax = axes[r, c]
+
+        df_marg  = _compute_marginal_errors(dataset, vary_col, vary_vals)
+        df_joint = _compute_joint_errors(dataset, vary_col, vary_vals)
+        merged   = df_marg.merge(df_joint, on=[vary_col, "variant"])
+
+        for val in vary_vals:
+            sub = merged[merged[vary_col] == val]
+            if sub.empty:
+                continue
+            ax.scatter(
+                sub[f"marginal_error_{error_col}"],
+                sub[f"joint_error_{error_col}"],
+                color=palette.get(val, "#AAAAAA"),
+                marker="o",
+                s=60, alpha=0.75, edgecolors="none",
+            )
+        
+        ax.set_title(dataset, fontsize=12, fontweight="bold")
+        ax.grid(True, linestyle="--", alpha=0.4)
+        if r == n_rows - 1 or i + n_cols >= n_datasets:
+            ax.set_xlabel("Mean Marginal Wasserstein", fontsize=10, fontweight="bold")
+        if c == 0:
+            ax.set_ylabel("Frobenius Norm of \u0394Corr", fontsize=10, fontweight="bold")
+
+    # Hide any empty subplots
+    for i in range(n_datasets, n_rows * n_cols):
+        r, c = divmod(i, n_cols)
+        axes[r, c].set_visible(False)
+
+    legend_patches = [
+        mpatches.Patch(color=palette.get(v, "#AAAAAA"), label=str(v).replace("_", " "))
+        for v in vary_vals
+    ]
+    fig.legend(handles=legend_patches, title=axis_label, loc="lower center", bbox_to_anchor=(0.5, -0.05), fontsize=10, title_fontsize=11, frameon=True, shadow=True, ncol=min(len(vary_vals), 5))
+    
+    fig.tight_layout()
+    plt.show()
+
+plot_marginal_vs_joint_per_dataset(error_col="synth")
