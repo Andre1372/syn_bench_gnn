@@ -186,7 +186,7 @@ def extract_dataset_stats_emb(dataset_name: str, num_graphs: int, orig_metadata:
 
     # Get embedding
     encoder = KNOWN_SAMPLERS[sampler_name](num_classes=1, is_discrete=is_discrete, rng=rng)
-    encoder.encode_features(stat_matrix, class_id=0)
+    encoder.encode_statistics(stat_matrix, class_id=0)
     dataset_embedding = encoder.get_embedding(class_id=0)
     
     # Construct CSV row
@@ -673,7 +673,7 @@ def main() -> None:
             encoder.load_embedding(target_emb, class_id=0)
             
             # 3. Sample feature vectors
-            sampled_matrix = encoder.sample_features(num_samples=args.cut_datasets, class_id=0)
+            sampled_matrix = encoder.sample_statistics(num_samples=args.cut_datasets, class_id=0)
             
             # 4. Prepare graph generation tasks
             graph_tasks = []
@@ -725,7 +725,7 @@ def main() -> None:
                 is_discrete=np.array([True, True] + [False] * 12), 
                 rng=rng
             )
-            synth_encoder.encode_features(synth_matrix, class_id=0)
+            synth_encoder.encode_statistics(synth_matrix, class_id=0)
             synth_emb = synth_encoder.get_embedding(class_id=0)
             
             # 8. Construct CSV row

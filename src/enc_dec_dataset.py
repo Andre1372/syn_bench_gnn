@@ -1,4 +1,4 @@
-"""Feature encoding/decoding for distributional graph-statistics sampling."""
+"""Statistics encoding/decoding for distributional graph-statistics sampling."""
 
 from __future__ import annotations
 
@@ -17,7 +17,7 @@ from sklearn.mixture import GaussianMixture
 logger = logging.getLogger(__name__)
 
 
-class FeatureEncoderDecoder(ABC):
+class StatisticsEncoderDecoder(ABC):
     """Abstract base class for encoding and sampling graph statistics.
 
     This class defines the interface for converting raw graph statistics into
@@ -30,7 +30,7 @@ class FeatureEncoderDecoder(ABC):
         Args:
             num_classes: Number of classes in the dataset; controls the size of
                 the per-class storage lists.
-            is_discrete: Boolean array of shape ``(num_features,)`` indicating
+            is_discrete: Boolean array of shape ``(num_statistics,)`` indicating
                 which statistics should be treated as discrete integers.
             rng: NumPy random Generator used for all stochastic operations.
                 A fresh generator is created when *None* is passed.
@@ -41,16 +41,16 @@ class FeatureEncoderDecoder(ABC):
         # We drop col 1 (edges) because redundant with avg degree + num_nodes
         self._is_discrete: np.ndarray = np.delete(is_discrete, 1)
 
-    def encode_features(self, stat_matrix: np.ndarray, class_id: int) -> None:
+    def encode_statistics(self, stat_matrix: np.ndarray, class_id: int) -> None:
         """Encodes the per-class statistics matrix and stores the result internally.
 
-        Before delegating to :meth:`_encode_features`, this method pre-processes
+        Before delegating to :meth:`_encode_statistics`, this method pre-processes
         the raw statistics matrix: it un-normalises the degree mean (col 2) and
         variance (col 3) by multiplying by ``N-1`` and ``(N-1)^2`` respectively,
         and drops the redundant ``n_edges`` column (col 1).
 
         Args:
-            stat_matrix: Raw statistics matrix of shape ``(num_samples, num_features)``
+            stat_matrix: Raw statistics matrix of shape ``(num_samples, num_statistics)``
                 as produced by the preprocessing pipeline (with n_edges at col 1).
             class_id: Zero-based index of the class being encoded.
         """
@@ -63,12 +63,12 @@ class FeatureEncoderDecoder(ABC):
         working_matrix[:, 3] = working_matrix[:, 3] * (denom ** 2)
         
         # Delete Edges (col 1)
-        self._encode_features(np.delete(working_matrix, 1, axis=1), class_id)
+        self._encode_statistics(np.delete(working_matrix, 1, axis=1), class_id)
 
-    def sample_features(self, num_samples: int, class_id: int) -> np.ndarray:
+    def sample_statistics(self, num_samples: int, class_id: int) -> np.ndarray:
         """Samples synthetic statistics from the stored representation of a class.
 
-        Delegates to :meth:`_sample_features` (which works in the reduced internal
+        Delegates to :meth:`_sample_statistics` (which works in the reduced internal
         space without n_edges), then post-processes: it derives ``n_edges`` from
         the sampled ``avg_degree`` and ``n_nodes``, re-normalises the degree mean
         and variance, and inserts n_edges back at col 1.
@@ -77,10 +77,10 @@ class FeatureEncoderDecoder(ABC):
             num_samples: Number of synthetic samples to generate.
             class_id: Zero-based index of the class to sample from.
         Returns:
-            Matrix of shape ``(num_samples, num_features)`` in the same column
-            layout as the original ``stat_matrix`` passed to :meth:`encode_features`.
+            Matrix of shape ``(num_samples, num_statistics)`` in the same column
+            layout as the original ``stat_matrix`` passed to :meth:`encode_statistics`.
         """
-        samples = self._sample_features(num_samples, class_id)
+        samples = self._sample_statistics(num_samples, class_id)
         
         n_nodes = samples[:, 0]
         avg_degree = np.maximum(samples[:, 1], 0)
@@ -104,11 +104,11 @@ class FeatureEncoderDecoder(ABC):
         return samples
 
     @abstractmethod
-    def _encode_features(self, stat_matrix: np.ndarray, class_id: int) -> None:
+    def _encode_statistics(self, stat_matrix: np.ndarray, class_id: int) -> None:
         pass
 
     @abstractmethod
-    def _sample_features(self, num_samples: int, class_id: int) -> np.ndarray:
+    def _sample_statistics(self, num_samples: int, class_id: int) -> np.ndarray:
         pass
 
     @abstractmethod
@@ -135,9 +135,9 @@ class FeatureEncoderDecoder(ABC):
     # ------------------------------------------------------------------
     # Internal feature-space bounds (used by load_embedding checks)
     # ------------------------------------------------------------------
-    # After encode_features removes col-1 (n_edges), the 13 internal columns are:
+    # After encode_statistics removes col-1 (n_edges), the 13 internal columns are:
     # (min, max) per internal column; None = unbounded on that side.
-    _FEATURE_BOUNDS: Final[dict[int, tuple[float | None, float | None]]] = {
+    _STATISTICS_BOUNDS: Final[dict[int, tuple[float | None, float | None]]] = {
         0:  (1.0,  None),   # n_nodes                    >= 1
         1:  (0.0,  None),   # avg_degree (unnormalised)  >= 0 (no upper bound)
         2:  (0.0,  None),   # degree_var (unnormalised)  >= 0 (no upper bound)
@@ -153,25 +153,25 @@ class FeatureEncoderDecoder(ABC):
         12: (0.0,  1.0),    # eccentricity_bin_3         in [0, 1]
     }
     def _check_percentile_matrix(self, enc: np.ndarray) -> bool:
-        """Validates a (num_percentiles, num_features) percentile matrix.
+        """Validates a (num_percentiles, num_statistics) percentile matrix.
 
         Checks:
-        - Min/max percentile values respect ``_FEATURE_BOUNDS``.
-        - Each feature column is non-decreasing (monotone increasing).
+        - Min/max percentile values respect ``_STATISTICS_BOUNDS``.
+        - Each statistic column is non-decreasing (monotone increasing).
 
         Args:
-            enc: Percentile matrix of shape (num_percentiles, num_features).
+            enc: Percentile matrix of shape (num_percentiles, num_statistics).
         Returns:
             True if all checks pass, False otherwise.
         """
-        for col_idx, (lower, upper) in self._FEATURE_BOUNDS.items():
+        for col_idx, (lower, upper) in self._STATISTICS_BOUNDS.items():
             if col_idx >= enc.shape[1]:
                 continue
             if lower is not None and enc[0, col_idx] < lower - 1e-8:
-                logger.warning(f"load_embedding: feature col {col_idx} min percentile {enc[0, col_idx]:.4g} < lower bound {lower:.4g}.")
+                logger.warning(f"load_embedding: statistic col {col_idx} min percentile {enc[0, col_idx]:.4g} < lower bound {lower:.4g}.")
                 return False
             if upper is not None and enc[-1, col_idx] > upper + 1e-8:
-                logger.warning(f"load_embedding: feature col {col_idx} max percentile {enc[-1, col_idx]:.4g} > upper bound {upper:.4g}.")
+                logger.warning(f"load_embedding: statistic col {col_idx} max percentile {enc[-1, col_idx]:.4g} > upper bound {upper:.4g}.")
                 return False
         diffs = np.diff(enc, axis=0)
         if np.any(diffs < -1e-8):
@@ -181,8 +181,8 @@ class FeatureEncoderDecoder(ABC):
         return True
 
 
-class MomentsEncoderDecoder(FeatureEncoderDecoder):
-    """Implementation of FeatureEncoderDecoder using statistical moments.
+class MomentsEncoderDecoder(StatisticsEncoderDecoder):
+    """Implementation of StatisticsEncoderDecoder using statistical moments.
 
     This class represents distributions using their first k moments (mean,
     variance, skewness, and kurtosis) and reconstructs samples via a polynomial
@@ -202,7 +202,7 @@ class MomentsEncoderDecoder(FeatureEncoderDecoder):
 
         Args:
             num_classes: Number of classes in the dataset.
-            is_discrete: Boolean array of shape (num_features,).
+            is_discrete: Boolean array of shape (num_statistics,).
             k: Number of moments to compute (between 1 and 4).
             rng: NumPy random generator instance.
         Raises:
@@ -212,11 +212,11 @@ class MomentsEncoderDecoder(FeatureEncoderDecoder):
         if not 1 <= k <= 4: raise ValueError(f"k must be between 1 and 4, got {k}.")
         self.k = k
 
-    def _encode_features(self, stat_matrix: np.ndarray, class_id: int) -> None:
+    def _encode_statistics(self, stat_matrix: np.ndarray, class_id: int) -> None:
         """Computes the first k moments for each feature and stores them for a class.
 
         Args:
-            stat_matrix: Matrix of shape (num_samples, num_features).
+            stat_matrix: Matrix of shape (num_samples, num_statistics).
             class_id: The ID of the class being encoded.
         Raises:
             ValueError: If class_id is out of bounds.
@@ -231,14 +231,14 @@ class MomentsEncoderDecoder(FeatureEncoderDecoder):
 
         self._encodings[class_id] = np.array(moments)
 
-    def _sample_features(self, num_samples: int, class_id: int) -> np.ndarray:
+    def _sample_statistics(self, num_samples: int, class_id: int) -> np.ndarray:
         """Generates samples for all features matching the stored moments of a class.
 
         Args:
             num_samples: Number of samples to generate.
             class_id: The ID of the class to sample from.
         Returns:
-            Matrix of shape (num_samples, num_features).
+            Matrix of shape (num_samples, num_statistics).
         Raises:
             ValueError: If class_id is out of bounds or not yet encoded.
         """
@@ -248,9 +248,9 @@ class MomentsEncoderDecoder(FeatureEncoderDecoder):
             raise ValueError(f"Class {class_id} must be encoded before sampling.")
 
         encoding_matrix = self._encodings[class_id]
-        num_features = encoding_matrix.shape[1]
+        num_statistics = encoding_matrix.shape[1]
         samples = np.column_stack([
-            self._sample_single_feature(encoding_matrix[:, i], num_samples) for i in range(num_features)
+            self._sample_single_statistic(encoding_matrix[:, i], num_samples) for i in range(num_statistics)
         ])
 
         if np.any(self._is_discrete):
@@ -261,7 +261,7 @@ class MomentsEncoderDecoder(FeatureEncoderDecoder):
 
         return samples
 
-    def _sample_single_feature(self, encoding: np.ndarray, num_samples: int) -> np.ndarray:
+    def _sample_single_statistic(self, encoding: np.ndarray, num_samples: int) -> np.ndarray:
         """Generates samples for a single feature matching target moments.
 
         Args:
@@ -364,37 +364,37 @@ class MomentsEncoderDecoder(FeatureEncoderDecoder):
         if not 0 <= class_id < len(self._encodings):
             raise ValueError(f"class_id {class_id} out of bounds (0-{len(self._encodings)-1}).")
 
-        num_features = self._is_discrete.size
-        expected_size = self.k * num_features
+        num_statistics = self._is_discrete.size
+        expected_size = self.k * num_statistics
         if embedding.size != expected_size:
             raise ValueError(f"Embedding size {embedding.size} does not match expected {expected_size}.")
 
-        enc = embedding.reshape(self.k, num_features)  # shape (k, num_features)
+        enc = embedding.reshape(self.k, num_statistics)  # shape (k, num_statistics)
 
         # --- Row 0: mean bounds checks ---
-        for col_idx, (lower, upper) in self._FEATURE_BOUNDS.items():
-            if col_idx >= num_features:
+        for col_idx, (lower, upper) in self._STATISTICS_BOUNDS.items():
+            if col_idx >= num_statistics:
                 continue
             val = enc[0, col_idx]
             if lower is not None and val < lower - 1e-8:
-                logger.warning(f"MomentsEncoderDecoder.load_embedding: mean of feature col {col_idx} ({val:.4g}) below lower bound {lower:.4g} for class {class_id}.")
+                logger.warning(f"MomentsEncoderDecoder.load_embedding: mean of statistic col {col_idx} ({val:.4g}) below lower bound {lower:.4g} for class {class_id}.")
                 return False
             if upper is not None and val > upper + 1e-8:
-                logger.warning(f"MomentsEncoderDecoder.load_embedding: mean of feature col {col_idx} ({val:.4g}) above upper bound {upper:.4g} for class {class_id}.")
+                logger.warning(f"MomentsEncoderDecoder.load_embedding: mean of statistic col {col_idx} ({val:.4g}) above upper bound {upper:.4g} for class {class_id}.")
                 return False
 
         # --- Row 1: variance must be >= 0 ---
         if self.k >= 2 and np.any(enc[1] < -1e-8):
             bad = np.where(enc[1] < -1e-8)[0].tolist()
-            logger.warning(f"MomentsEncoderDecoder.load_embedding: negative variance for feature cols {bad} in class {class_id}.")
+            logger.warning(f"MomentsEncoderDecoder.load_embedding: negative variance for statistic cols {bad} in class {class_id}.")
             return False
 
         self._encodings[class_id] = enc
         return True
 
 
-class PercentileEncoderDecoder(FeatureEncoderDecoder):
-    """Implementation of FeatureEncoderDecoder using percentiles.
+class PercentileEncoderDecoder(StatisticsEncoderDecoder):
+    """Implementation of StatisticsEncoderDecoder using percentiles.
 
     This class represents distributions using a set of percentile values (edges)
     and reconstructs samples by interpolating between these values.
@@ -405,7 +405,7 @@ class PercentileEncoderDecoder(FeatureEncoderDecoder):
 
         Args:
             num_classes: Number of classes in the dataset.
-            is_discrete: Boolean array of shape (num_features,).
+            is_discrete: Boolean array of shape (num_statistics,).
             percentile_size: The size of the percentile steps (between 0 and 1).
             replicate_correlation: Whether to replicate correlation between features.
             rng: NumPy random generator instance.
@@ -415,11 +415,11 @@ class PercentileEncoderDecoder(FeatureEncoderDecoder):
         self.percentile_size = percentile_size
         self.replicate_correlation = replicate_correlation
 
-    def _encode_features(self, stat_matrix: np.ndarray, class_id: int) -> None:
+    def _encode_statistics(self, stat_matrix: np.ndarray, class_id: int) -> None:
         """Computes the percentile edges for each feature and stores them for a class.
 
         Args:
-            stat_matrix: Matrix of shape (num_samples, num_features).
+            stat_matrix: Matrix of shape (num_samples, num_statistics).
             class_id: The ID of the class being encoded.
         """
         if not 0 <= class_id < len(self._encodings):
@@ -438,21 +438,21 @@ class PercentileEncoderDecoder(FeatureEncoderDecoder):
             working_matrix[:, discrete_mask] += jitter
             
         # Vectorized quantile computation across all features (axis=0)
-        self._encodings[class_id] = np.quantile(working_matrix, q, axis=0) # Shape: (num_percentiles, num_features)
+        self._encodings[class_id] = np.quantile(working_matrix, q, axis=0) # Shape: (num_percentiles, num_statistics)
 
         if self.replicate_correlation:
             corr_matrix = pd.DataFrame(stat_matrix).corr(method="spearman").values
             corr_matrix = np.nan_to_num(corr_matrix, nan=0.0)
             self._corr_matrices[class_id] = corr_matrix + np.eye(corr_matrix.shape[0]) * 1e-6
 
-    def _sample_features(self, num_samples: int, class_id: int) -> np.ndarray:
+    def _sample_statistics(self, num_samples: int, class_id: int) -> np.ndarray:
         """Generates samples for all features matching stored percentiles of a class.
 
         Args:
             num_samples: Number of samples to generate per feature.
             class_id: The ID of the class to sample from.
         Returns:
-            Matrix of shape (num_samples, num_features).
+            Matrix of shape (num_samples, num_statistics).
         """
         if class_id >= len(self._encodings):
             raise ValueError(f"class_id {class_id} out of bounds (0-{len(self._encodings)-1}).")
@@ -460,18 +460,18 @@ class PercentileEncoderDecoder(FeatureEncoderDecoder):
             raise ValueError(f"Class {class_id} must be encoded before sampling.")
             
         encoding_matrix = self._encodings[class_id]
-        num_percentiles, num_features = encoding_matrix.shape
+        num_percentiles, num_statistics = encoding_matrix.shape
         q_grid = np.linspace(0, 1, num_percentiles)
 
         # --- PHASE COPULA for generating u ---
         if self.replicate_correlation:
             # Sample multivariate normal distribution
-            z = self.rng.multivariate_normal(mean=np.zeros(num_features), cov=self._corr_matrices[class_id], size=num_samples)
+            z = self.rng.multivariate_normal(mean=np.zeros(num_statistics), cov=self._corr_matrices[class_id], size=num_samples)
             # Transform to uniform via normal CDF
             u = scipy.stats.norm.cdf(z)
         else:
             # Sample uniform random values for all samples and features at once
-            u = self.rng.uniform(0, 1, size=(num_samples, num_features))        
+            u = self.rng.uniform(0, 1, size=(num_samples, num_statistics))        
         
         # --- PHASE MARGINALS for generating final samples ---
         # Find indices of the bins for each sample in u
@@ -520,7 +520,7 @@ class PercentileEncoderDecoder(FeatureEncoderDecoder):
 
         Validates the embedding semantics before storing it:
         - Percentile values respect per-feature lower bounds.
-        - Each feature column is monotone non-decreasing across percentiles.
+        - Each statistic column is monotone non-decreasing across percentiles.
         - Correlation matrix is corrected to be PSD if needed.
 
         Args:
@@ -532,16 +532,16 @@ class PercentileEncoderDecoder(FeatureEncoderDecoder):
         if not 0 <= class_id < len(self._encodings):
             raise ValueError(f"class_id {class_id} out of bounds (0-{len(self._encodings)-1}).")
 
-        num_features = self._is_discrete.size
+        num_statistics = self._is_discrete.size
         q = np.arange(0, 1 + (self.percentile_size / 2), self.percentile_size)
         q[q > 1.0] = 1.0
         if q[-1] < 1.0: q = np.append(q, 1.0)
         num_percentiles = len(q)
 
-        enc_size = num_percentiles * num_features
+        enc_size = num_percentiles * num_statistics
 
         if self.replicate_correlation:
-            expected_triu_size = num_features * (num_features + 1) // 2
+            expected_triu_size = num_statistics * (num_statistics + 1) // 2
             expected_size = enc_size + expected_triu_size
             if embedding.size != expected_size:
                 raise ValueError(f"Embedding size {embedding.size} does not match expected {expected_size}.")
@@ -553,7 +553,7 @@ class PercentileEncoderDecoder(FeatureEncoderDecoder):
                 raise ValueError(f"Embedding size {embedding.size} does not match expected {enc_size}.")
             enc_flat = embedding
 
-        enc = enc_flat.reshape(num_percentiles, num_features)
+        enc = enc_flat.reshape(num_percentiles, num_statistics)
 
         # --- Validate percentile matrix ---
         if not self._check_percentile_matrix(enc):
@@ -562,8 +562,8 @@ class PercentileEncoderDecoder(FeatureEncoderDecoder):
         self._encodings[class_id] = enc
 
         if self.replicate_correlation:
-            corr_mat = np.zeros((num_features, num_features))
-            triu_indices = np.triu_indices(num_features)
+            corr_mat = np.zeros((num_statistics, num_statistics))
+            triu_indices = np.triu_indices(num_statistics)
             corr_mat[triu_indices] = triu_flat
             corr_mat = corr_mat + corr_mat.T - np.diag(np.diag(corr_mat))
 
@@ -578,8 +578,8 @@ class PercentileEncoderDecoder(FeatureEncoderDecoder):
         return True
 
 
-class GMCMEncoderDecoder(FeatureEncoderDecoder):
-    """Implementation of FeatureEncoderDecoder using Gaussian Mixture Copula Models (GMCM).
+class GMCMEncoderDecoder(StatisticsEncoderDecoder):
+    """Implementation of StatisticsEncoderDecoder using Gaussian Mixture Copula Models (GMCM).
 
     This class captures the complex joint distribution of features using a GMM in the
     latent normal space, after transforming the original marginals to uniform via percentiles.
@@ -590,7 +590,7 @@ class GMCMEncoderDecoder(FeatureEncoderDecoder):
 
         Args:
             num_classes: Number of classes in the dataset.
-            is_discrete: Boolean array of shape (num_features,).
+            is_discrete: Boolean array of shape (num_statistics,).
             percentile_size: The size of the percentile steps (between 0 and 1).
             n_components: Number of Gaussian mixture components in the latent space.
             rng: NumPy random generator instance.
@@ -602,11 +602,11 @@ class GMCMEncoderDecoder(FeatureEncoderDecoder):
         self.n_components = n_components
         self._gmm_models: list[GaussianMixture | None] = [None] * num_classes
 
-    def _encode_features(self, stat_matrix: np.ndarray, class_id: int) -> None:
+    def _encode_statistics(self, stat_matrix: np.ndarray, class_id: int) -> None:
         """Computes percentiles for marginals and fits a GMM on the latent normal space.
 
         Args:
-            stat_matrix: Matrix of shape (num_samples, num_features).
+            stat_matrix: Matrix of shape (num_samples, num_statistics).
             class_id: The ID of the class being encoded.
         """
         if not 0 <= class_id < len(self._encodings):
@@ -625,16 +625,16 @@ class GMCMEncoderDecoder(FeatureEncoderDecoder):
             working_matrix[:, discrete_mask] += jitter
 
         # Vectorized quantile computation across all features (axis=0)
-        # Shape: (num_percentiles, num_features)
+        # Shape: (num_percentiles, num_statistics)
         percentiles = np.quantile(working_matrix, q, axis=0)
         self._encodings[class_id] = percentiles
         
         # --- PHASE LATENT SPACE: PIT to Uniform, then to Normal ---
-        num_percentiles, num_features = percentiles.shape
+        num_percentiles, num_statistics = percentiles.shape
         q_uniform = np.linspace(0, 1, num_percentiles)
         u = np.zeros_like(working_matrix)
         
-        for i in range(num_features):
+        for i in range(num_statistics):
             u[:, i] = np.interp(working_matrix[:, i], percentiles[:, i], q_uniform)
             
         # Clip to avoid infinite values in the inverse normal CDF
@@ -650,7 +650,7 @@ class GMCMEncoderDecoder(FeatureEncoderDecoder):
         gmm.fit(z)
         self._gmm_models[class_id] = gmm
 
-    def _sample_features(self, num_samples: int, class_id: int) -> np.ndarray:
+    def _sample_statistics(self, num_samples: int, class_id: int) -> np.ndarray:
         """Generates samples by sampling from GMM and applying inverse PIT.
 
         Args:
@@ -658,7 +658,7 @@ class GMCMEncoderDecoder(FeatureEncoderDecoder):
             class_id: The ID of the class to sample from.
             
         Returns:
-            Matrix of shape (num_samples, num_features).
+            Matrix of shape (num_samples, num_statistics).
         """
         if class_id >= len(self._encodings):
             raise ValueError(f"class_id {class_id} out of bounds (0-{len(self._encodings)-1}).")
@@ -666,7 +666,7 @@ class GMCMEncoderDecoder(FeatureEncoderDecoder):
             raise ValueError(f"Class {class_id} must be encoded before sampling.")
             
         encoding_matrix = self._encodings[class_id]
-        num_percentiles, num_features = encoding_matrix.shape
+        num_percentiles, num_statistics = encoding_matrix.shape
         q_grid = np.linspace(0, 1, num_percentiles)
 
         # --- PHASE COPULA: Sample from GMM and transform to uniform ---
@@ -756,16 +756,16 @@ class GMCMEncoderDecoder(FeatureEncoderDecoder):
         if not 0 <= class_id < len(self._encodings):
             raise ValueError(f"class_id {class_id} out of bounds (0-{len(self._encodings)-1}).")
 
-        num_features = self._is_discrete.size
+        num_statistics = self._is_discrete.size
         q = np.arange(0, 1 + (self.percentile_size / 2), self.percentile_size)
         q[q > 1.0] = 1.0
         if q[-1] < 1.0: q = np.append(q, 1.0)
         num_percentiles = len(q)
 
-        enc_size = num_percentiles * num_features
+        enc_size = num_percentiles * num_statistics
         weights_size = self.n_components
-        means_size = self.n_components * num_features
-        cov_triu_size = self.n_components * (num_features * (num_features + 1) // 2)
+        means_size = self.n_components * num_statistics
+        cov_triu_size = self.n_components * (num_statistics * (num_statistics + 1) // 2)
 
         expected_size = enc_size + weights_size + means_size + cov_triu_size
         if embedding.size != expected_size:
@@ -779,7 +779,7 @@ class GMCMEncoderDecoder(FeatureEncoderDecoder):
         cov_triu_flat = embedding[ptr:]
 
         # --- Validate percentile matrix ---
-        enc = enc_flat.reshape(num_percentiles, num_features)
+        enc = enc_flat.reshape(num_percentiles, num_statistics)
         if not self._check_percentile_matrix(enc):
             return False
 
@@ -791,7 +791,7 @@ class GMCMEncoderDecoder(FeatureEncoderDecoder):
 
 
         # --- Validate GMM means (same bounds as percentile min values) ---
-        means = means_flat.reshape(self.n_components, num_features)
+        means = means_flat.reshape(self.n_components, num_statistics)
         # Means are in the *latent normal space* (after PIT), so no domain bounds apply.
         # We only do a basic NaN/Inf sanity check.
         if not np.all(np.isfinite(means)):
@@ -799,13 +799,13 @@ class GMCMEncoderDecoder(FeatureEncoderDecoder):
             return False
 
         # --- Restore covariances (with PSD correction) ---
-        covariances = np.zeros((self.n_components, num_features, num_features))
-        triu_indices = np.triu_indices(num_features)
-        triu_len = num_features * (num_features + 1) // 2
+        covariances = np.zeros((self.n_components, num_statistics, num_statistics))
+        triu_indices = np.triu_indices(num_statistics)
+        triu_len = num_statistics * (num_statistics + 1) // 2
 
         for i in range(self.n_components):
             cov_triu = cov_triu_flat[i * triu_len : (i + 1) * triu_len]
-            cov_mat = np.zeros((num_features, num_features))
+            cov_mat = np.zeros((num_statistics, num_statistics))
             cov_mat[triu_indices] = cov_triu
             cov_mat = cov_mat + cov_mat.T - np.diag(np.diag(cov_mat))
             cov_mat = (cov_mat + cov_mat.T) / 2.0
@@ -820,14 +820,14 @@ class GMCMEncoderDecoder(FeatureEncoderDecoder):
         gmm.means_ = means
         gmm.covariances_ = covariances
 
-        precisions_chol = np.empty((self.n_components, num_features, num_features))
+        precisions_chol = np.empty((self.n_components, num_statistics, num_statistics))
         for k, covariance in enumerate(covariances):
             try:
                 cov_chol = scipy.linalg.cholesky(covariance, lower=True)
             except scipy.linalg.LinAlgError:
-                cov_chol = scipy.linalg.cholesky(covariance + 1e-6 * np.eye(num_features), lower=True)
+                cov_chol = scipy.linalg.cholesky(covariance + 1e-6 * np.eye(num_statistics), lower=True)
             precisions_chol[k] = scipy.linalg.solve_triangular(
-                cov_chol, np.eye(num_features), lower=True
+                cov_chol, np.eye(num_statistics), lower=True
             ).T
         gmm.precisions_cholesky_ = precisions_chol
         gmm.converged_ = True
@@ -838,7 +838,7 @@ class GMCMEncoderDecoder(FeatureEncoderDecoder):
         return True
 
 
-KNOWN_SAMPLERS: dict[str, Callable[..., FeatureEncoderDecoder]] = {
+KNOWN_SAMPLERS: dict[str, Callable[..., StatisticsEncoderDecoder]] = {
     "gmcm": GMCMEncoderDecoder,
     "moments": MomentsEncoderDecoder,
     "percentile": partial(PercentileEncoderDecoder, replicate_correlation=False),

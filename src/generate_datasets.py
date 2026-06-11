@@ -42,7 +42,7 @@ from src.node_features import (
     sort_source_x_by_neighbor_degree,
 )
 from src.graph_analysis import per_graph_statistics, aggregate_statistics
-from src.enc_dec_dataset import FeatureEncoderDecoder, KNOWN_SAMPLERS
+from src.enc_dec_dataset import StatisticsEncoderDecoder, KNOWN_SAMPLERS
 from src.padma.graph_generator import generate_graph as padma_generate_graph
 from src.ergm.graph_generator import ergm_fit_sample
 from src.anndg.graph_generator import generate_graph as anndg_generate_graph
@@ -121,8 +121,8 @@ def generate_graph(target_stats: dict[str, Any], method: str, rng: np.random.Gen
         
         # ERGM's MCMC with motif statistics is unstable on very small graphs;
         # fall back to padma which correctly replicates n_nodes and n_edges.
-        if n_nodes < 5:
-            logger.info(f"Graph too small for ERGM (n_nodes={n_nodes} < 5), falling back to padma.")
+        if n_nodes <= 5:
+            logger.info(f"Graph too small for ERGM (n_nodes={n_nodes} <= 5), falling back to padma.")
             return padma_generate_graph(target_stats, rng)
         
         # We need a configuration directory or a default config for ERGM.
@@ -250,7 +250,7 @@ def _build_tasks_direct(dataset_obj: "DatasetPT", method: str, num_variants: int
     return tasks
 
 
-def _build_tasks_distributional(dataset_obj: DatasetPT, metadata: dict[str, Any], num_variants: int, all_seeds: list[list[int]], encoder: FeatureEncoderDecoder) -> list[dict[str, Any]]:
+def _build_tasks_distributional(dataset_obj: DatasetPT, metadata: dict[str, Any], num_variants: int, all_seeds: list[list[int]], encoder: StatisticsEncoderDecoder) -> list[dict[str, Any]]:
     """Builds tasks by sampling class-wise statistics for all variants at once.
     
     Args:
@@ -258,7 +258,7 @@ def _build_tasks_distributional(dataset_obj: DatasetPT, metadata: dict[str, Any]
         metadata: Dataset metadata containing 'per_class_stats' and 'stat_structure'.
         num_variants: The number of synthetic variants to generate.
         all_seeds: Pre-generated random seeds, shape (n_graphs, num_variants).
-        encoder: An initialized and pre-fitted FeatureEncoderDecoder.
+        encoder: An initialized and pre-fitted StatisticsEncoderDecoder.
     Returns:
         A list of task dictionaries containing target stats per variant.
     Raises:
@@ -272,7 +272,7 @@ def _build_tasks_distributional(dataset_obj: DatasetPT, metadata: dict[str, Any]
 
     # Encode features once for all classes
     for class_id_str, class_info in per_class_stats.items():
-        encoder.encode_features(class_info["stat_matrix"], int(class_id_str))
+        encoder.encode_statistics(class_info["stat_matrix"], int(class_id_str))
 
     # Group baseline graph indices by class to perform batch-sampling
     from collections import defaultdict
@@ -294,7 +294,7 @@ def _build_tasks_distributional(dataset_obj: DatasetPT, metadata: dict[str, Any]
     for v in range(num_variants):
         for class_id, indices in indices_by_class.items():
             num_samples = len(indices)
-            sampled_matrix = encoder.sample_features(num_samples=num_samples, class_id=class_id)
+            sampled_matrix = encoder.sample_statistics(num_samples=num_samples, class_id=class_id)
             for j, idx in enumerate(indices):
                 tasks[idx]["target_stats"][v] = unflatten_stats(sampled_matrix[j], stat_structure)
 

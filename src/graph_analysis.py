@@ -255,10 +255,7 @@ def calculate_eccentricity(graph: ig.Graph, bins: int = 4, bin_indices: list[np.
     if n_nodes == 0:
         return np.zeros(bins, dtype=float), bin_indices if bin_indices is not None else [np.array([], dtype=int)] * bins
 
-    dists = np.array(graph.distances(), dtype=float)
-    # Mask out infinity (unreachable paths) by replacing them with -1.0
-    finite_dists = np.where(np.isinf(dists), -1.0, dists)
-    eccentricities = np.max(finite_dists, axis=1)
+    eccentricities = graph.eccentricity()
 
     if bin_indices is None:
         node_degrees = np.array(graph.degree(), dtype=int)
@@ -563,3 +560,26 @@ def calculate_eccentricity_error(obtained_ecc: np.ndarray, target_ecc: np.ndarra
     error = np.mean(loss)
     
     return float(error)
+
+
+def calculate_motifs_error(obtained_motifs: np.ndarray, target_motifs: np.ndarray) -> float:
+    """Calculates the structural error between obtained and target motif counts.
+
+    Uses the Relative RMSE metric to handle motifs of vastly different scales.
+    The raw error for each motif is divided by max(|target|, 1.0) before computing
+    the Root Mean Square Error.
+
+    Args:
+        obtained_motifs: NumPy array of normalized motif frequencies for the generated graph.
+        target_motifs: NumPy array of normalized motif frequencies for the reference graph.
+    Returns:
+        A non-negative scalar representing the overall motif discrepancy.
+    """
+    if len(obtained_motifs) == 0 or len(target_motifs) == 0:
+        return 0.0
+        
+    inverse_normalizer = 1.0 / np.maximum(np.abs(target_motifs), 1.0)
+    relative_errors = (obtained_motifs - target_motifs) * inverse_normalizer
+    error = float(np.sqrt(np.mean(np.square(relative_errors))))
+    
+    return error

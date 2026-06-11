@@ -24,6 +24,7 @@ from src.graph_analysis import (
     calculate_moments_error,
     calculate_annd_error,
     calculate_eccentricity_error,
+    calculate_motifs_error,
 )
 
 
@@ -41,7 +42,12 @@ DATASET_NAMES = ["BZR", "DHFR", "Mutagenicity", "MUTAG"]
 # Cache original dataset statistics for target secondary metrics
 original_stats_cache = {}
 for dname in DATASET_NAMES:
-    orig_path = PROJECT_ROOT / "data" / dname / f"{dname}_original.pt"
+    if FIXED_FEATURES is not None:
+        orig_path = PROJECT_ROOT / "data" / dname / f"{dname}_original_{FIXED_FEATURES}.pt"
+        if not orig_path.exists():
+            orig_path = PROJECT_ROOT / "data" / dname / f"{dname}_original.pt"
+    else:
+        orig_path = PROJECT_ROOT / "data" / dname / f"{dname}_original.pt"
     if orig_path.exists():
         try:
             payload = torch.load(orig_path, map_location="cpu", weights_only=False)
@@ -158,6 +164,10 @@ def load_fidelity_data() -> pd.DataFrame:
             t_ecc = safe_array(t_stat.get("eccentricity"))
             a_ecc = safe_array(a_stat.get("eccentricity"))
 
+            # Motifs (length 8 for k=4)
+            t_motifs = safe_array(t_stat.get("motifs"), expected_length=8)
+            a_motifs = safe_array(a_stat.get("motifs"), expected_length=8)
+
             # Retrieve target secondary metrics from caching of original datasets
             orig_stat = {}
             if dataset in original_stats_cache and i < len(original_stats_cache[dataset]):
@@ -211,6 +221,11 @@ def load_fidelity_data() -> pd.DataFrame:
                 row[f"actual_annd_{idx}"] = a_annd[idx]
                 row[f"target_eccentricity_{idx}"] = t_ecc[idx]
                 row[f"actual_eccentricity_{idx}"] = a_ecc[idx]
+                
+            # Detail for Motifs
+            for idx in range(8):
+                row[f"target_motifs_{idx}"] = t_motifs[idx]
+                row[f"actual_motifs_{idx}"] = a_motifs[idx]
 
             rows.append(row)
 
@@ -280,6 +295,11 @@ def compute_fidelity_errors(df: pd.DataFrame) -> pd.DataFrame:
         t_ecc = np.array([row[f"target_eccentricity_{i}"] for i in range(4)])
         a_ecc = np.array([row[f"actual_eccentricity_{i}"] for i in range(4)])
         err_row["eccentricity_error"] = calculate_eccentricity_error(a_ecc, t_ecc)
+        
+        # Specialized Errors for Motifs
+        t_motifs = np.array([row[f"target_motifs_{i}"] for i in range(8)])
+        a_motifs = np.array([row[f"actual_motifs_{i}"] for i in range(8)])
+        err_row["motifs_error"] = calculate_motifs_error(a_motifs, t_motifs)
         
         error_rows.append(err_row)
         
@@ -380,6 +400,7 @@ def plot_error_distributions(df_errors: pd.DataFrame, metrics: list[str], datase
         "moments_error": "Degree Moments",
         "annd_error": "ANND",
         "eccentricity_error": "Eccentricity",
+        "motifs_error": "Motifs",
         "clustering_error": "Clustering (Implicit)",
         "assortativity_error": "Assortativity (Implicit)",
         "modularity_error": "Modularity (Implicit)",
@@ -582,6 +603,7 @@ def plot_executive_error_heatmap(df_errors: pd.DataFrame, error_metrics: list[st
         "moments_error": "Degree Moments",
         "annd_error": "ANND",
         "eccentricity_error": "Eccentricity",
+        "motifs_error": "Motifs",
         "clustering_error": "Clustering (Implicit)",
         "assortativity_error": "Assortativity (Implicit)",
         "modularity_error": "Modularity (Implicit)",
@@ -638,4 +660,4 @@ def plot_executive_error_heatmap(df_errors: pd.DataFrame, error_metrics: list[st
 # plot_error_distributions(df_errors, metrics=["nodes_error", "clustering_error"])
 # plot_implicit_density_grid(df_fidelity, metrics=["clustering", "assortativity"])
 # plot_error_cdf(df_errors, error_metric="moments_error")
-plot_executive_error_heatmap(df_errors, error_metrics=["nodes_error", "edges_error", "moments_error", "annd_error", "eccentricity_error", "clustering_error", "assortativity_error", "modularity_error", "efficiency_error"])
+plot_executive_error_heatmap(df_errors, error_metrics=["nodes_error", "edges_error", "moments_error", "annd_error", "eccentricity_error", "motifs_error", "clustering_error", "assortativity_error", "modularity_error", "efficiency_error"])
