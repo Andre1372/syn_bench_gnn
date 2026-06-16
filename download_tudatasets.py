@@ -52,7 +52,7 @@ def fetch_dataset_stats(dataset_name: str, data_dir: Path, feature_type: str = "
             compatible = False
             discard_reason = "missing_features"
         else:
-            compatible = (num_graphs >= 50 and num_graphs <= 5000 and avg_nodes <= 300)
+            compatible = (num_graphs >= 100 and num_graphs <= 5000 and avg_nodes <= 100)
             discard_reason = "structural" if not compatible else None
 
         return {

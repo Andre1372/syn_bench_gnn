@@ -27,7 +27,13 @@ from src.train_gnn import evaluate_dataset
 
 
 # Cell 1 - Global Variables & Data Loading
-DATASET_NAMES = ["AIDS", "BZR", "COX2", "DHFR", "Mutagenicity", "MUTAG", "NCI1", "NCI109", "DD", "PROTEINS", "Cuneiform", "MSRC_9", "MSRC_21", "MSRC_21C"]
+DATASET_NAMES = [
+        "AIDS", "BZR", "COX2", "DHFR", "Mutagenicity", "MUTAG", "NCI1", "NCI109",
+        "PTC_FM", "PTC_FR", "PTC_MM", "PTC_MR", "PROTEINS", 
+
+        # Originally with more than 2 classes, but can be binarized
+        "ENZYMES", "Cuneiform", "MSRC_9", "MSRC_21", "MSRC_21C"
+    ]
 DATA_DIR = PROJECT_ROOT / "data"
 
 def generate_paired_datasets(dataset_names: list[str], cut_number: int) -> None:
@@ -59,7 +65,7 @@ def generate_paired_datasets(dataset_names: list[str], cut_number: int) -> None:
             out_filename=f"{dname}_original.pt"
         )
 
-generate_paired_datasets(DATASET_NAMES, cut_number=500)
+generate_paired_datasets(DATASET_NAMES, cut_number=15000)
 
 def load_graph_stats() -> pd.DataFrame:
     """Loads dataset of graph statistics for each graph in the original datasets."""
@@ -87,6 +93,8 @@ def load_graph_stats() -> pd.DataFrame:
             annd = annd if annd is not None else [None] * 4
             ecc = stats.get("eccentricity")
             ecc = ecc if ecc is not None else [None] * 4
+            motifs = stats.get("motifs")
+            motifs = motifs if motifs is not None else [None] * 8
             
             row = {
                 "dataset": dname,
@@ -108,6 +116,14 @@ def load_graph_stats() -> pd.DataFrame:
                 "eccentricity_2": ecc[1],
                 "eccentricity_3": ecc[2],
                 "eccentricity_4": ecc[3],
+                "motif_0": motifs[0],
+                "motif_1": motifs[1],
+                "motif_2": motifs[2],
+                "motif_3": motifs[3],
+                "motif_4": motifs[4],
+                "motif_5": motifs[5],
+                "motif_6": motifs[6],
+                "motif_7": motifs[7],
                 
                 # Implicit topological stats
                 "modularity": stats.get("modularity"),
@@ -129,7 +145,7 @@ display(df_stats.head())
 def plot_improving_distinctions(df: pd.DataFrame, datasets: list[str], method: str = "pca") -> None:
     """Plots PCA or t-SNE projections of per-graph statistics for selected datasets."""
     n_rows = len(datasets)
-    n_cols = 5
+    n_cols = 6
     
     fig, axes = plt.subplots(n_rows, n_cols, figsize=(4 * n_cols, 3.5 * n_rows), squeeze=False)
     
@@ -138,14 +154,16 @@ def plot_improving_distinctions(df: pd.DataFrame, datasets: list[str], method: s
     feat_2 = feat_1 + ["degree_moment_1", "degree_moment_2", "degree_moment_3", "degree_moment_4"]
     feat_3 = feat_2 + ["annd_1", "annd_2", "annd_3", "annd_4"]
     feat_4 = feat_3 + ["eccentricity_1", "eccentricity_2", "eccentricity_3", "eccentricity_4"]
-    feat_5 = feat_4 + ["modularity", "clustering", "assortativity", "efficiency", "diameter"]
+    feat_5 = feat_4 + ["motif_0", "motif_1", "motif_2", "motif_3", "motif_4", "motif_5", "motif_6", "motif_7"]
+    feat_6 = feat_5 + ["modularity", "clustering", "assortativity", "efficiency", "diameter"]
     
-    feature_sets = [feat_1, feat_2, feat_3, feat_4, feat_5]
+    feature_sets = [feat_1, feat_2, feat_3, feat_4, feat_5, feat_6]
     titles = [
         "Nodes & Edges",
         "+ Degree Moments",
         "+ ANND",
         "+ Eccentricity",
+        "+ Motifs",
         "+ Global Tops"
     ]
     
@@ -207,8 +225,8 @@ def plot_improving_distinctions(df: pd.DataFrame, datasets: list[str], method: s
     plt.tight_layout()
     plt.show()
 
-# Test the function
 plot_improving_distinctions(df_stats, DATASET_NAMES, method="tsne")
+
 
 
 # Cell 3 - GNN Evaluations
@@ -270,5 +288,4 @@ def evaluate_gnn_performances(dataset_names: list[str], runs: int = 5) -> pd.Dat
     display(summary_df)
     return summary_df
 
-# Scommenta la riga sottostante per far partire l'addestramento e calcolare la media (potrebbe richiedere tempo)
 df_gnn_perf = evaluate_gnn_performances(DATASET_NAMES, runs=5)

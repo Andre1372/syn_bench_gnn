@@ -6,12 +6,9 @@ This script is the python replica of a notebook, so it is not meant to be run as
 from pathlib import Path
 import sys
 
-import torch
 import numpy as np
 import networkx as nx
-import igraph as ig
 import matplotlib.pyplot as plt
-import seaborn as sns
 from torch_geometric.datasets import TUDataset
 
 # Ensure project root is in path
@@ -21,7 +18,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from src.data_utils import pytorch_to_networkx, networkx_to_igraph, DatasetPT
 from src.graph_analysis import analyze_single_graph, calculate_annd_error, calculate_moments_error, calculate_eccentricity_error
-from notebooks.visualization_utils import plot_graph, plot_annd, plot_eccentricity
+from notebooks.visualization_utils import plot_graph, plot_annd, plot_eccentricity, save_figure_pdf
 from src.anndg.graph_generator import generate_graph
 from src.generate_datasets import generate_graph as generate_graph_by_method
 
@@ -108,20 +105,25 @@ print("="*70 + "\n")
 
 # Cell 3 - Multi-Generator Graph Comparison
 # Generate one synthetic graph per method and display alongside the original.
-METHODS = ["dummyNodes", "dummyEdges", "padma", "anndg", "anndgE"]
+METHODS = ["dummyNodes", "dummyEdges", "padma", "anndg", "anndgE", "ergm"]
 METHOD_LABELS = {
-    "dummyNodes": "Dummy Nodes (ER-p)",
-    "dummyEdges": "Dummy Edges (GNM)",
+    "dummyNodes": "DummyNodes",
+    "dummyEdges": "DummyEdges",
     "padma":      "PADMA",
     "anndg":      "ANNDG",
     "anndgE":     "ANNDG+Ecc",
+    "ergm":       "GARME",
 }
+
+# Set font family to Times New Roman
+plt.rcParams['font.family'] = 'serif'
+plt.rcParams['font.serif'] = ['Times New Roman'] + plt.rcParams['font.serif']
 
 rng_cmp = np.random.default_rng(seed=99887766)
 
 # Build target_stats once (reuse the already-computed one from Cell 2)
 target_stats_for_gen = dict(target_stats)
-target_stats_for_gen["observed_nx"] = GRAPH_NX  # needed by pdd / ergm (not used here)
+target_stats_for_gen["observed_nx"] = GRAPH_NX  # needed by pdd / ergm
 
 generated = {}  # method -> nx.Graph
 for method in METHODS:
@@ -132,47 +134,47 @@ for method in METHODS:
         print(f"[WARNING] {method} failed: {exc}")
         generated[method] = nx.empty_graph(target_stats_for_gen.get("n_nodes", 1))
 
-# 2 rows x 3 cols: row 0 → dummyNodes, dummyEdges, padma | row 1 → anndg, anndgE, original
-fig, axes = plt.subplots(2, 3, figsize=(10, 6.5))
-fig.suptitle(
-    f"{DATASET} #{IDX} — Generator Comparison",
-    fontsize=14, fontweight="bold", y=0.98,
-)
+# 2 rows x 4 cols: row 0 → dummyNodes, dummyEdges, padma, anndg
+#                  row 1 → anndgE, ergm, original, [hidden]
+SYNTH_COLOR = "#E06C75"
+ORIG_COLOR  = "#5B9BD5"
 
-plot_order = ["dummyNodes", "dummyEdges", "padma", "anndg", "anndgE"]
+fig, axes = plt.subplots(2, 4, figsize=(14, 6.5))
+
+plot_order = ["dummyNodes", "dummyEdges", "padma", "anndg", "anndgE", "ergm"]
 for ax, method in zip(axes.flat, plot_order):
     G = generated[method]
     label = METHOD_LABELS[method]
-    n, m = G.number_of_nodes(), G.number_of_edges()
-    plot_graph(graph=G, ax=ax, dataset_name=label, graph_index=IDX)
-    ax.set_title(f"{label}\n(n={n}, m={m})", fontsize=10)
-    
-    # Enclose graph in a beautiful frame (riquadro) and add margin/padding
+    plot_graph(graph=G, ax=ax, dataset_name=label, graph_index=IDX, node_color=SYNTH_COLOR)
+    ax.set_title(label, fontsize=15)
+
+    # Frame
     ax.axis("on")
     ax.set_xticks([])
     ax.set_yticks([])
-    ax.margins(0.18)  # Leave room around nodes so graph looks smaller/well-framed
+    ax.margins(0.04)
     for spine in ax.spines.values():
         spine.set_visible(True)
         spine.set_color('#d3d3d3')
         spine.set_linewidth(1.0)
 
-# Last cell: original graph
-ax_orig = axes.flat[-1]
-n_orig = GRAPH_NX.number_of_nodes()
-m_orig = GRAPH_NX.number_of_edges()
-plot_graph(graph=GRAPH_NX, ax=ax_orig, dataset_name=f"{DATASET} — Original", graph_index=IDX)
-ax_orig.set_title(f"Original\n(n={n_orig}, m={m_orig})", fontsize=10)
+# 7th subplot (row 1, col 2): original graph
+ax_orig = axes[1, 2]
+plot_graph(graph=GRAPH_NX, ax=ax_orig, dataset_name=DATASET, graph_index=IDX, node_color=ORIG_COLOR)
+ax_orig.set_title(f"{DATASET} #{IDX} — Original", fontsize=15, fontweight="bold")
 
-# Enclose original graph in the same frame style
 ax_orig.axis("on")
 ax_orig.set_xticks([])
 ax_orig.set_yticks([])
-ax_orig.margins(0.18)
+ax_orig.margins(0.04)
 for spine in ax_orig.spines.values():
     spine.set_visible(True)
-    spine.set_color('#d3d3d3')
-    spine.set_linewidth(1.0)
+    spine.set_color('#5B9BD5')
+    spine.set_linewidth(1.5)
+
+# Hide the unused 8th cell (row 1, col 3)
+axes[1, 3].axis("off")
 
 plt.tight_layout()
 plt.show()
+save_figure_pdf(fig, axes, PROJECT_ROOT / "single_generation_example.pdf")

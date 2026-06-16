@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 import matplotlib.pyplot as plt
@@ -14,12 +15,42 @@ from src.data_utils import networkx_to_igraph
 from src.graph_analysis import calculate_annd, calculate_eccentricity
 
 
+def save_figure_pdf(
+    fig: plt.Figure,
+    axes: plt.Axes | np.ndarray,
+    output_path: str | Path,
+    dpi: int = 300,
+) -> Path:
+    """Saves a matplotlib figure to a PDF file.
+
+    Args:
+        fig: The matplotlib Figure to save.
+        axes: The Axes (or array of Axes) belonging to the figure. Accepted
+            for API symmetry and potential future use; not used directly.
+        output_path: Destination file path.  The ``.pdf`` extension is
+            appended automatically if not already present.
+        dpi: Resolution used for raster elements embedded in the PDF
+            (default: 300).
+
+    Returns:
+        The resolved :class:`pathlib.Path` of the saved file.
+    """
+    path = Path(output_path)
+    if path.suffix.lower() != ".pdf":
+        path = path.with_suffix(".pdf")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(path, format="pdf", dpi=dpi, bbox_inches="tight")
+    print(f"[save_figure_pdf] Saved \u2192 {path.resolve()}")
+    return path
+
+
 def plot_graph(
     graph: nx.Graph, 
     ax: plt.Axes, 
     dataset_name: str,
     graph_index: int,
-    fixed_pos: dict[int, tuple[float, float]] | None = None
+    fixed_pos: dict[int, tuple[float, float]] | None = None,
+    node_color: str = "skyblue",
 ) -> None:
     """Visualizes a single graph on a given Axes with its motif counts.
 
@@ -29,14 +60,36 @@ def plot_graph(
         dataset_name: Name of the dataset for the title.
         graph_index: Index of the graph for the title.
         fixed_pos: Optional dictionary of node positions for consistent layout.
+        node_color: Color for the nodes (default: 'skyblue').
     """
     num_nodes: int = graph.number_of_nodes()
     num_edges: int = graph.number_of_edges()
 
-    # Use the fixed positions from the original graph for consistency
-    pos = fixed_pos if fixed_pos is not None else nx.spring_layout(graph, seed=42)
+    # Choose layout: kamada-kawai distributes nodes evenly on connected graphs;
+    # fall back to spring_layout (with generous repulsion k) for disconnected ones.
+    if fixed_pos is not None:
+        pos = fixed_pos
+    elif nx.is_connected(graph) and num_nodes > 0:
+        try:
+            pos = nx.kamada_kawai_layout(graph)
+        except Exception:
+            k_val = 2.0 / (num_nodes ** 0.5) if num_nodes > 1 else 1.0
+            pos = nx.spring_layout(graph, seed=42, k=k_val, iterations=100)
+    else:
+        k_val = 2.0 / (num_nodes ** 0.5) if num_nodes > 1 else 1.0
+        pos = nx.spring_layout(graph, seed=42, k=k_val, iterations=100)
 
-    nx.draw(graph, pos, ax=ax, node_size=30, node_color="skyblue", edge_color='gray', with_labels=False)
+    nx.draw(graph, pos, ax=ax, node_size=30, node_color=node_color, edge_color='gray', with_labels=False)
+
+    # Rescale axes tightly around the actual node positions to remove blank padding.
+    if pos:
+        xs = [p[0] for p in pos.values()]
+        ys = [p[1] for p in pos.values()]
+        x_pad = max((max(xs) - min(xs)) * 0.08, 0.05)
+        y_pad = max((max(ys) - min(ys)) * 0.08, 0.05)
+        ax.set_xlim(min(xs) - x_pad, max(xs) + x_pad)
+        ax.set_ylim(min(ys) - y_pad, max(ys) + y_pad)
+
     ax.set_title(
         f"Dataset: {dataset_name}  |  Index: {graph_index}\n"
         f"Nodes: {num_nodes}   Edges: {num_edges}",
