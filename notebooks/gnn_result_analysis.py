@@ -20,54 +20,75 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent if "__file__" in globals()
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from notebooks.visualization_utils import add_baseline_guide, plot_performance_distribution
+from notebooks.visualization_utils import add_baseline_guide, plot_performance_distribution, save_figure_pdf
 
 
 
 # Cell 1 - Global Variables & Data Loading
 # Exactly ONE of the three variables should be None at a time; the other two
 # must be set to a single valid string from the canonical orders below.
-FIXED_METHODS:  str | None = None        # set to None to vary methods
+FIXED_METHODS:  str | None = "anndgE"        # set to None to vary methods
 FIXED_SAMPLERS: str | None = "nosampler"    # set to None to vary samplers
-FIXED_FEATURES: str | None = "log_bin_deg"         # set to None to vary features
+FIXED_FEATURES: str | None = None         # set to None to vary features
 
 RESULTS_DIR = PROJECT_ROOT / "results"
 DATASET_NAMES = [
-        # "BZR", "Cuneiform", "DHFR", "MUTAG", "Mutagenicity" # ,"MSRC_9", "MSRC_21", "MSRC_21C" # Features 
-        "BZR", "DHFR", "MUTAG", "Mutagenicity" # Methods
+        "BZR", "DHFR", "MUTAG", "Mutagenicity", "AIDS", "COX2", "NCI1", "NCI109", "PTC_FM", "PTC_FR", "PTC_MM", "PTC_MR", "PROTEINS", "ENZYMES", "Cuneiform", "MSRC_9", "MSRC_21", "MSRC_21C" # all
+        # "BZR", "DHFR", "MUTAG", "Mutagenicity", "NCI1", "NCI109", "PROTEINS", "ENZYMES", "Cuneiform"#, "AIDS", "MSRC_9", "MSRC_21", "MSRC_21C" # Features 
+        # "BZR", "DHFR", "MUTAG", "Mutagenicity"#, "AIDS", "NCI1", "NCI109", "PROTEINS" # Methods
+        # "BZR", "DHFR", "MUTAG", "Mutagenicity"#, "AIDS", "NCI1", "NCI109", "PROTEINS" # Samplers
 ]
 
 # Methods
 METHOD_ORDER = ["dummyNodes", "dummyEdges", "padma", "anndg", "anndgE", "ergm", "nextGen"]
 METHOD_PALETTE = {
     "original":   "#5B9BD5",
-    "dummyNodes": "#DA7CF7",
-    "dummyEdges": "#98C379",
-    "padma":      "#F5C431",
-    "anndg":      "#E06C75",
-    "anndgE":     "#5CE9FF",
-    "ergm":     "#C47900",
-    "nextGen":    "#5242D1",
+    "dummyNodes": "#E07A5F",
+    "dummyEdges": "#F4A261",
+    "padma":      "#F2CC8F",
+    "anndg":      "#8A4F7D",
+    "anndgE":     "#B56576",
+    "nextGen":    "#9E2A2B",
 }
 
 # Samplers (None is stored as "nosampler" in filenames)
 SAMPLER_ORDER = ["nosampler", "moments", "percentile", "percentile_corr", "gmcm"]
 SAMPLER_PALETTE = {
     "nosampler":       "#5B9BD5",
-    "moments":         "#DA7CF7",
-    "percentile":      "#98C379",
-    "percentile_corr": "#F5C431",
-    "gmcm":            "#E06C75",
+    "moments":         "#B5C99A",
+    "percentile":      "#71A070",
+    "percentile_corr": "#2C6E49",
+    "gmcm":            "#D2A85C",
 }
 
 # Features
 FEATURE_ORDER = ["constant", "log_bin_deg", "random_sample", "degree_ordered", "neighbor_degree_ordered"]
 FEATURE_PALETTE = {
-    "constant":                  "#5CE9FF",
-    "log_bin_deg":               "#DA7CF7",
-    "random_sample":             "#98C379",
-    "degree_ordered":            "#C47900",
-    "neighbor_degree_ordered":   "#FF8C69",
+    "constant":                  "#5B9BD5",
+    "log_bin_deg":               "#9F86C0",
+    "random_sample":             "#5E548E",
+    "degree_ordered":            "#D6ABD0",
+    "neighbor_degree_ordered":   "#9E697F",
+}
+
+METHOD_LABELS: dict[str, str] = {
+    "original":              "Original",
+    "dummyNodes":            "DummyNodes",
+    "dummyEdges":            "DummyEdges",
+    "padma":                 "PADMA",
+    "anndg":                 "DpfAnnd",
+    "anndgE":                "DpfAnnd+E",
+    "nextGen":               "NextGen",
+    "nosampler":             "No Sampler",
+    "moments":               "Moments",
+    "percentile":            "Percentile",
+    "percentile_corr":       "Percentile Corr",
+    "gmcm":                  "GMCM",
+    "constant":              "Constant",
+    "log_bin_deg":           "Log Bin Deg",
+    "random_sample":         "Random Sample",
+    "degree_ordered":        "Degree Ordered",
+    "neighbor_degree_ordered": "Neighbor Deg Ord",
 }
 
 def _canonical_order(values, order):
@@ -243,7 +264,7 @@ def plot_performance_trajectory(df: pd.DataFrame) -> None:
 
     for row_idx, row_val in enumerate(row_values):
         row_color = row_pal.get(row_val, "#AAAAAA")
-        row_label = str(row_val).replace("_", " ").upper()
+        row_label = METHOD_LABELS.get(str(row_val), str(row_val).replace("_", " ").upper())
 
         # For the method axis the variant sources live in "source"; for others
         # we filter by the varying column value.
@@ -308,7 +329,7 @@ def plot_performance_trajectory(df: pd.DataFrame) -> None:
 
     handles = [mpatches.Patch(color=METHOD_PALETTE["original"], alpha=0.4, label="Original Baseline")]
     handles += [
-        mpatches.Patch(color=row_pal.get(v, "#AAAAAA"), alpha=0.8, label=str(v).replace("_", " ").upper())
+        mpatches.Patch(color=row_pal.get(v, "#AAAAAA"), alpha=0.8, label=METHOD_LABELS.get(str(v), str(v).replace("_", " ").upper()))
         for v in row_values
     ]
     fig.legend(handles=handles, loc="lower center", bbox_to_anchor=(0.5, -0.05), ncol=1 + len(handles), frameon=True, shadow=True, fontsize=10)
@@ -328,7 +349,6 @@ def compute_delta_df(df: pd.DataFrame) -> pd.DataFrame:
 
 df_synth = compute_delta_df(df_raw)
 
-
 def plot_performance_overview(df: pd.DataFrame, df_synth: pd.DataFrame) -> None:
     vary_col, categories_all, pal, title_suffix = _vary_col_and_meta()
     df_f       = _filter_df(df)
@@ -340,7 +360,6 @@ def plot_performance_overview(df: pd.DataFrame, df_synth: pd.DataFrame) -> None:
         sharex=False, sharey=False, squeeze=False,
         gridspec_kw={"width_ratios": [1, 1, 0.2, 1, 1]}
     )
-    fig.suptitle(f"GNN Performance — Aggregated Overview ({title_suffix})", fontsize=16, fontweight="bold", y=1.02)
 
     for r_idx, dataset in enumerate(DATASETS):
         df_ds       = df_f[df_f["dataset"] == dataset]
@@ -366,26 +385,16 @@ def plot_performance_overview(df: pd.DataFrame, df_synth: pd.DataFrame) -> None:
 
             ax_box.set_xlabel("")
             ax_box.set_ylabel("")
-            ax_box.set_xticks(range(len(categories)))
-            ax_box.set_xticklabels([str(c).replace("_", " ").upper() for c in categories], fontsize=10)
+            ax_box.set_xticks([])
             ax_box.grid(axis="y", linestyle="--", alpha=0.4)
             if c_idx == 1: ax_box.tick_params(labelleft=False)
 
             if r_idx == 0:
-                ax_box.set_title(f"F1-Score: {model}", fontsize=12, fontweight="bold", pad=8)
-                if c_idx == 0:
-                    handles = (
-                        [mpatches.Patch(color=METHOD_PALETTE["original"], alpha=0.4, label="Original Baseline")]
-                        + [mpatches.Patch(color=palette_map.get(c, "#AAAAAA"), alpha=0.8,
-                                          label=str(c).replace("_", " ").upper()) for c in categories]
-                    )
-                    leg = ax_box.legend(
-                        handles=handles, loc="lower left", bbox_to_anchor=(0.0, 1.1),
-                        ncol=1 + len(categories), frameon=True, shadow=True, fontsize=10
-                    )
-                    leg.set_in_layout(False)
+                ax_box.set_title(f"F1-Score: {model}", fontsize=15, fontweight="bold", pad=8)
             if c_idx == 0:
-                ax_box.text(-0.25, 0.5, dataset, transform=ax_box.transAxes, fontsize=12, fontweight="bold", va="center", ha="center", rotation=90)
+                ax_box.set_ylabel(dataset, fontsize=15, fontweight="bold", labelpad=6)
+
+            ax_box.tick_params(axis='both', which='major', labelsize=13)
 
         delta_agg = df_synth_ds.groupby([vary_col, "model"], observed=True)["delta_test_f1"].agg(["mean", "std"])
         for c_idx, model in enumerate(MODELS):
@@ -422,21 +431,39 @@ def plot_performance_overview(df: pd.DataFrame, df_synth: pd.DataFrame) -> None:
                 ax_bar.tick_params(labelleft=False)
 
             if r_idx == 0:
-                ax_bar.set_title(f"|ΔF1|: {model}", fontsize=12, fontweight="bold", pad=8)
-                if c_idx == 0:
-                    handles = [
-                        mpatches.Patch(color=palette_map.get(c, "#AAAAAA"), alpha=0.8,
-                                       label=str(c).replace("_", " ").upper())
-                        for c in categories
-                    ]
-                    leg = ax_bar.legend(
-                        handles=handles, loc="lower left", bbox_to_anchor=(0.0, 1.1),
-                        ncol=len(categories), frameon=True, shadow=True, fontsize=10
-                    )
-                    leg.set_in_layout(False)
+                ax_bar.set_title(f"|ΔF1|: {model}", fontsize=15, fontweight="bold", pad=8)
+            ax_bar.tick_params(axis='both', which='major', labelsize=13)
 
-    fig.tight_layout()
+        y_mins = [axes[r_idx, c].get_ylim()[0] for c in range(2)]
+        y_maxs = [axes[r_idx, c].get_ylim()[1] for c in range(2)]
+        shared_f1_lim = (min(y_mins), max(y_maxs))
+        for c in range(2):
+            axes[r_idx, c].set_ylim(shared_f1_lim)
+
+        y_maxs_delta = [axes[r_idx, 3 + c].get_ylim()[1] for c in range(2)]
+        shared_delta_top = max(y_maxs_delta)
+        for c in range(2):
+            axes[r_idx, 3 + c].set_ylim(bottom=0.0, top=shared_delta_top)
+
+    _, categories_all_leg, palette_map_leg, _ = _vary_col_and_meta()
+    all_present = set(df_synth_f[vary_col].dropna().astype(str).unique())
+    categories_leg = [v for v in categories_all_leg if v in all_present]
+    legend_handles = (
+        [mpatches.Patch(color=METHOD_PALETTE["original"], alpha=0.4, label="Original Baseline")]
+        + [mpatches.Patch(color=palette_map_leg.get(c, "#AAAAAA"), alpha=0.8,
+                          label=METHOD_LABELS.get(str(c), str(c).replace("_", " ").upper())) for c in categories_leg]
+    )
+    fig.legend(
+        handles=legend_handles,
+        loc="upper center",
+        bbox_to_anchor=(0.5, 0.99),
+        ncol=1 + len(categories_leg),
+        frameon=True, shadow=True, fontsize=15
+    )
+
+    fig.tight_layout(rect=[0, 0, 1, 0.94])
     plt.subplots_adjust(wspace=0.1)
+    save_figure_pdf(fig, ax_box, PROJECT_ROOT / "complete_gnn_trend_methods.pdf")
     plt.show()
 
 def _compute_aggregated_summary_df(df: pd.DataFrame, df_synth: pd.DataFrame) -> pd.DataFrame:
@@ -458,7 +485,7 @@ def _compute_aggregated_summary_df(df: pd.DataFrame, df_synth: pd.DataFrame) -> 
         categories = ["original"] + [v for v in categories_all if v in present]
 
         for cat in categories:
-            r_tuples.append((ds, str(cat).replace("_", " ").upper()))
+            r_tuples.append((ds, METHOD_LABELS.get(str(cat), str(cat).replace("_", " ").upper())))
             row = []
 
             for model in MODELS:
@@ -520,8 +547,14 @@ display_aggregated_summary(df_raw, df_synth)
 
 
 # Cell 5 - Final aggregated line plot (|ΔF1| trend)
+plt.rcParams['font.family'] = 'serif'
+plt.rcParams['font.serif'] = ['Times New Roman'] + plt.rcParams['font.serif']
+
+
 def plot_final_results_comparison(df_synth: pd.DataFrame) -> None:
-    """Plots the aggregated GNN classification performance gap across all datasets."""
+    """Plots the GNN classification performance gap aggregated at Dataset level,
+    showing 95% confidence intervals calculated across the 5 independent datasets.
+    """
     vary_col, categories, pal, title_suffix = _vary_col_and_meta()
     df_perf = _filter_df(df_synth)
 
@@ -529,14 +562,17 @@ def plot_final_results_comparison(df_synth: pd.DataFrame) -> None:
         print(f"No performance data found matching current FIXED_* settings.")
         return
 
-    df_perf = df_perf.copy()
+    group_cols = ["dataset", "model", vary_col]
+    seen = set()
+    group_cols = [c for c in group_cols if c in df_perf.columns and not (c in seen or seen.add(c))]
+    df_perf = df_perf.groupby(group_cols, as_index=False, observed=True)["delta_test_f1"].mean()
+
     df_perf[vary_col] = df_perf[vary_col].astype(str)
     present = set(df_perf[vary_col].unique())
     ordered_cats = [v for v in categories if v in present]
     df_perf[vary_col] = pd.Categorical(df_perf[vary_col], categories=ordered_cats, ordered=True)
 
-    fig, ax = plt.subplots(figsize=(10, 6))
-    fig.suptitle(f"Global Summary: GNN Performance Gap ({title_suffix})", fontsize=15, fontweight="bold", y=0.98)
+    fig, ax = plt.subplots(figsize=(10, 5))
 
     sns.lineplot(
         data=df_perf,
@@ -547,19 +583,21 @@ def plot_final_results_comparison(df_synth: pd.DataFrame) -> None:
         markersize=8,
         linewidth=2.5,
         ax=ax,
-        errorbar=None
+        errorbar=("ci", 95)
     )
 
-    ax.set_title("Aggregated GNN Performance Gap (|ΔF1|)", fontsize=12, fontweight="bold")
-    ax.set_xlabel(vary_col.replace("_", " ").title(), fontsize=11, fontweight="bold")
-    ax.set_ylabel("Mean |ΔF1| (across all datasets)", fontsize=11, fontweight="bold")
+    ax.set_xlabel("")
+    ax.set_ylabel("Mean |ΔF1|", fontsize=15, fontweight="bold")
     ax.grid(axis="y", linestyle="--", alpha=0.4)
-    ax.legend(title="GNN Model", frameon=True, shadow=True)
+    ax.legend(title="GNN Model", frameon=True, shadow=True, fontsize=13, title_fontsize=15)
 
+    tick_labels = [METHOD_LABELS.get(str(c), str(c).replace("_", " ").upper()) for c in ordered_cats]
     ax.set_xticks(range(len(ordered_cats)))
-    ax.set_xticklabels([str(c).replace("_", " ").upper() for c in ordered_cats], fontsize=10)
+    ax.set_xticklabels(tick_labels, fontsize=13)
+    ax.tick_params(axis='both', which='major', labelsize=13)
 
     plt.tight_layout()
+    save_figure_pdf(fig, ax, PROJECT_ROOT / "gnn_trend_methods.pdf")
     plt.show()
 
 plot_final_results_comparison(df_synth)

@@ -25,8 +25,8 @@ from src.generate_datasets import generate_graph as generate_graph_by_method
 
 
 # Cell 1 - Global Variables & Data Loading
-DATASET = "BZR"
-IDX = 330
+DATASET = "DHFR"
+IDX = 37
 
 try:
     dataset = DatasetPT(PROJECT_ROOT / "data" / DATASET / f"{DATASET}_original.pt")
